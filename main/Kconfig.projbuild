@@ -485,6 +485,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_ESP_S3_LCD_EV_Board_2
         bool "乐鑫ESP S3 LCD EV Board 2开发板"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_ZHENGCHEN_1_54TFT_WIFI_BITCRAFT
+        bool "比特工坊 Bitcraft 1.54TFT (WIFI)"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_ZHENGCHEN_1_54TFT_WIFI
         bool "征辰科技1.54(WIFI)"
         depends on IDF_TARGET_ESP32S3
