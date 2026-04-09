@@ -1,4 +1,7 @@
 #include "wifi_board.h"
+#include "media_player.h"
+#include "flappy_bird.h"
+#include "video_player.h"
 #include "codecs/no_audio_codec.h"
 #include "zhengchen_lcd_display.h"
 #include "system_reset.h"
@@ -15,6 +18,8 @@
 
 #include <driver/rtc_io.h>
 #include <esp_sleep.h>
+#include <atomic>
+#include <algorithm>
 
 #define TAG "ZHENGCHEN_1_54TFT_WIFI"
 
@@ -28,6 +33,7 @@ private:
     PowerManager* power_manager_;
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
+    std::atomic<bool> press_consumed_{false}; // set by OnPressDown when it handles the press
 
     void InitializePowerManager() {
         power_manager_ = new PowerManager(GPIO_NUM_9);
@@ -76,9 +82,33 @@ private:
     }
 
     void InitializeButtons() {
-        
+
+        // OnPressDown: only the game needs instant response (flap timing).
+        boot_button_.OnPressDown([this]() {
+            press_consumed_.store(false);
+            auto& game = FlappyBird::GetInstance();
+            if (game.IsActive()) {
+                game.Flap();
+                press_consumed_.store(true);
+            }
+        });
+
+        // OnClick: pause media/video — or start/stop chat in standby.
         boot_button_.OnClick([this]() {
+            if (press_consumed_.exchange(false)) return;
             power_save_timer_->WakeUp();
+
+            auto& video = VideoPlayer::GetInstance();
+            if (video.GetState() != VideoPlayer::State::kIdle) {
+                video.TogglePause();
+                return;
+            }
+            auto& player = MediaPlayer::GetInstance();
+            if (player.GetState() != MediaPlayer::State::kIdle) {
+                player.TogglePause();
+                return;
+            }
+
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
                 EnterWifiConfigMode();
@@ -87,18 +117,61 @@ private:
             app.ToggleChatState();
         });
 
-        // 设置开机按钮的长按事件（直接进入配网模式）
+        // OnDoubleClick: volume -5% during media/video.
+        boot_button_.OnDoubleClick([this]() {
+            auto& video = VideoPlayer::GetInstance();
+            auto& player = MediaPlayer::GetInstance();
+            if (video.GetState() != VideoPlayer::State::kIdle ||
+                player.GetState() != MediaPlayer::State::kIdle) {
+                auto codec = GetAudioCodec();
+                auto vol = std::max(0, codec->output_volume() - 5);
+                codec->SetOutputVolume(vol);
+                GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(vol));
+            }
+        });
+
+        // OnMultipleClick(3): volume +5% during media/video.
+        boot_button_.OnMultipleClick([this]() {
+            auto& video = VideoPlayer::GetInstance();
+            auto& player = MediaPlayer::GetInstance();
+            if (video.GetState() != VideoPlayer::State::kIdle ||
+                player.GetState() != MediaPlayer::State::kIdle) {
+                auto codec = GetAudioCodec();
+                auto vol = std::min(100, codec->output_volume() + 5);
+                codec->SetOutputVolume(vol);
+                GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(vol));
+            }
+        }, 3);
+
+        // OnLongPress: exit game / stop media or video / WiFi config in standby.
         boot_button_.OnLongPress([this]() {
-            // 唤醒电源保存定时器
             power_save_timer_->WakeUp();
-            // 获取应用程序实例
             auto& app = Application::GetInstance();
-            
-            // 进入配网模式
-            app.SetDeviceState(kDeviceStateWifiConfiguring);
-            
-            // 重置WiFi配置以确保进入配网模式
-            EnterWifiConfigMode();
+            auto& game = FlappyBird::GetInstance();
+            if (game.IsActive()) {
+                game.Stop();
+                app.SetDeviceState(kDeviceStateIdle);
+                return;
+            }
+            auto& video = VideoPlayer::GetInstance();
+            if (video.GetState() != VideoPlayer::State::kIdle) {
+                video.Stop();
+                app.SetDeviceState(kDeviceStateIdle);
+                return;
+            }
+            auto& player = MediaPlayer::GetInstance();
+            if (player.GetState() != MediaPlayer::State::kIdle) {
+                player.Stop();
+                app.SetDeviceState(kDeviceStateIdle);
+                return;
+            }
+            // Only enter WiFi config from true standby — guard against firing
+            // immediately after a game/media exit during the same hold.
+            auto state = app.GetDeviceState();
+            if (state == kDeviceStateIdle || state == kDeviceStateStarting) {
+                app.SetDeviceState(kDeviceStateWifiConfiguring);
+                EnterWifiConfigMode();
+            }
         });
 
         volume_up_button_.OnClick([this]() {
@@ -160,7 +233,7 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y));
         ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_, true));
 
-        display_ = new ZHENGCHEN_LcdDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, 
+        display_ = new ZHENGCHEN_LcdDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y,
             DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
         display_->SetupHighTempWarningPopup();
     }

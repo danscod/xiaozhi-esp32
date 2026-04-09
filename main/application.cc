@@ -864,11 +864,23 @@ void Application::HandleStateChangedEvent() {
     led->OnStateChanged();
     
     switch (new_state) {
+        case kDeviceStateStarting:
+            display->SetStatus(Lang::Strings::INITIALIZING);
+            break;
+        case kDeviceStateActivating:
+            display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
+            break;
+        case kDeviceStateUpgrading:
+            display->SetStatus(Lang::Strings::UPGRADING);
+            break;
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+            display->SetChatMessage("system",
+                "\xe2\x97\x8f press  start listening\n"
+                "\xe2\x97\x8f hold   WiFi setup");
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
@@ -880,6 +892,11 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
+            display->SetChatMessage("system",
+                "Try asking me:\n"
+                "\xe2\x97\x8f play Flappy Bird\n"
+                "\xe2\x97\x8f play music\n"
+                "\xe2\x97\x8f play a video");
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
@@ -923,7 +940,6 @@ void Application::HandleStateChangedEvent() {
             audio_service_.EnableWakeWordDetection(false);
             break;
         default:
-            // Do nothing
             break;
     }
 }

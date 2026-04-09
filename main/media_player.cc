@@ -210,12 +210,24 @@ void MediaPlayer::Stop() {
     if (state_ == State::kIdle) return;
     paused_.store(false);          // unblock stream task so it sees stop_requested_
     stop_requested_.store(true);
+    // Flush audio queues immediately so playback stops without waiting for the
+    // buffer to drain naturally (which can take ~2 s at 40-frame buffer depth).
+    // ResetDecoder() also notifies audio_queue_cv_ so any blocked
+    // PushPacketToDecodeQueue call wakes and the StreamTask can exit promptly.
+    Application::GetInstance().GetAudioService().ResetDecoder();
 }
 
 void MediaPlayer::TogglePause() {
     if (state_ == State::kIdle) return;
     bool now_paused = !paused_.load();
     paused_.store(now_paused);
+    if (now_paused) {
+        // Clear the already-buffered audio so playback stops immediately.
+        // On resume the StreamTask continues streaming from its current HTTP
+        // position so no data is lost — it just skips the queued-but-unplayed
+        // buffer (at most ~2 s), which is the desired behaviour.
+        Application::GetInstance().GetAudioService().ResetDecoder();
+    }
     ESP_LOGI(TAG, "Playback %s", now_paused ? "paused" : "resumed");
 }
 
