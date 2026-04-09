@@ -879,8 +879,9 @@ void Application::HandleStateChangedEvent() {
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
             display->SetChatMessage("system",
-                "\xe2\x97\x8f press  start listening\n"
-                "\xe2\x97\x8f hold   WiFi setup");
+                "\xe2\x97\x8f press   start listening\n"
+                "\xe2\x97\x8f hold    WiFi setup\n"
+                "\xe2\x97\x8f slide O-btn  power off");
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
