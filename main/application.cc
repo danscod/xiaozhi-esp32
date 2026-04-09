@@ -1,4 +1,5 @@
 #include "application.h"
+#include "telemetry.h"
 #include "board.h"
 #include "display.h"
 #include "system_info.h"
@@ -254,6 +255,7 @@ void Application::Run() {
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
             }
+            // Telemetry heartbeat is timer-driven (every 5 min) via Telemetry::Init()
         }
     }
 }
@@ -298,6 +300,7 @@ void Application::HandleNetworkDisconnectedEvent() {
 
 void Application::HandleActivationDoneEvent() {
     ESP_LOGI(TAG, "Activation done");
+    Telemetry::GetInstance().Init();
 
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
@@ -781,6 +784,7 @@ void Application::HandleWakeWordDetectedEvent() {
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
+    Telemetry::GetInstance().OnWakeWord(wake_word);
 
     if (state == kDeviceStateIdle) {
         audio_service_.EncodeWakeWord();
@@ -851,6 +855,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 
 void Application::HandleStateChangedEvent() {
     DeviceState new_state = state_machine_.GetState();
+    Telemetry::GetInstance().OnStateChanged(new_state);
     clock_ticks_ = 0;
 
     auto& board = Board::GetInstance();
