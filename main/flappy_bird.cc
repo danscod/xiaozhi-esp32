@@ -3,6 +3,7 @@
 #include "board.h"
 #include "application.h"
 #include "display/display.h"
+#include "assets/lang_config.h"
 
 #include <lvgl.h>
 #include <esp_log.h>
@@ -350,6 +351,7 @@ void FlappyBird::DoTick() {
     // Input
     if (flap_pending_.exchange(false)) {
         vel_y_ = -JUMP_FORCE;
+        Application::GetInstance().PlaySound(Lang::Sounds::OGG_VIBRATION);
     }
 
     // Physics
@@ -371,6 +373,7 @@ void FlappyBird::DoTick() {
     if (!passed_ && px + PIPE_W < BIRD_X) {
         passed_ = true;
         score_++;
+        Application::GetInstance().PlaySound(Lang::Sounds::OGG_SUCCESS);
     }
 
     // Collision: floor / ceiling
@@ -399,6 +402,7 @@ void FlappyBird::DoTick() {
     if (dead) {
         ESP_LOGI(TAG, "Game over — score %d", score_);
         game_over_.store(true);
+        Application::GetInstance().PlaySound(Lang::Sounds::OGG_EXCLAMATION);
         // Timer keeps running so DoTick() can handle restart input.
 
         // Show game over overlay — stays until press (restart) or long-press (exit).

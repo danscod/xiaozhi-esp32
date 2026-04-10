@@ -4,6 +4,9 @@
  */
 
 #include "mcp_server.h"
+#include "media_player.h"
+#include "flappy_bird.h"
+#include "video_player.h"
 #include <esp_log.h>
 #include <esp_app_desc.h>
 #include <algorithm>
@@ -17,10 +20,14 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
+#include "system_info.h"
 
 #define TAG "MCP"
 
 McpServer::McpServer() {
+    // MediaPlayer tools are registered in AddCommonTools() to avoid a circular
+    // GetInstance() deadlock: the McpServer constructor cannot call GetInstance()
+    // on itself (via RegisterMcpTools) before the static local is fully initialized.
 }
 
 McpServer::~McpServer() {
@@ -120,6 +127,46 @@ void McpServer::AddCommonTools() {
             });
     }
 #endif
+
+    // Device "about" tool — fetches a pre-written description of the device from
+    // the website and returns the text to the AI, which can then speak it or
+    // summarise it. The same content is also available at /esp32/xiaozhi/about.html.
+    AddTool("self.device.about",
+        "Get a description of how this device works — hardware, software, AI "
+        "integration, and capabilities. Use this when the user asks 'how does "
+        "this work?', 'what can you do?', or similar questions about the device.",
+        PropertyList(),
+        [](const PropertyList&) -> ReturnValue {
+            auto& board   = Board::GetInstance();
+            auto  network = board.GetNetwork();
+            auto  http    = network->CreateHttp(0);
+            http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
+            http->SetHeader("Device-Id",  SystemInfo::GetMacAddress().c_str());
+            if (!http->Open("GET", "https://www.danscodellaro.com/esp32/xiaozhi/about")) {
+                return std::string("Error: could not reach the about endpoint.");
+            }
+            if (http->GetStatusCode() != 200) {
+                http->Close();
+                return std::string("Error: about endpoint returned an error.");
+            }
+            std::string body = http->ReadAll();
+            http->Close();
+            // Parse out the "content" field from the JSON response.
+            cJSON* root = cJSON_Parse(body.c_str());
+            if (!root) return std::string("Error: bad response.");
+            auto* content_j = cJSON_GetObjectItem(root, "content");
+            std::string result = cJSON_IsString(content_j)
+                ? std::string(content_j->valuestring)
+                : body;
+            cJSON_Delete(root);
+            return result;
+        });
+
+    // Register custom media player tools (must be here, not in constructor,
+    // to avoid a circular GetInstance() deadlock during static initialization).
+    MediaPlayer::GetInstance().RegisterMcpTools();
+    FlappyBird::GetInstance().RegisterMcpTools();
+    VideoPlayer::GetInstance().RegisterMcpTools();
 
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());

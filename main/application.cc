@@ -10,6 +10,8 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "video_player.h"
+#include "media_player.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -899,14 +901,18 @@ void Application::HandleStateChangedEvent() {
                 "\xe2\x97\x8f play music\n"
                 "\xe2\x97\x8f play a video");
 
-            // Make sure the audio processor is running
-            if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
+            // Make sure the audio processor is running, but not if video/media is actively
+            // playing — a state transition during playback (e.g. from acoustic wake-word
+            // feedback) must not flush the audio decode queue or start voice capture.
+            if ((play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) &&
+                VideoPlayer::GetInstance().GetState() == VideoPlayer::State::kIdle &&
+                MediaPlayer::GetInstance().GetState() == MediaPlayer::State::kIdle) {
                 // For auto mode, wait for playback queue to be empty before enabling voice processing
                 // This prevents audio truncation when STOP arrives late due to network jitter
                 if (listening_mode_ == kListeningModeAutoStop) {
                     audio_service_.WaitForPlaybackQueueEmpty();
                 }
-                
+
                 // Send the start listening command
                 protocol_->SendStartListening(listening_mode_);
                 audio_service_.EnableVoiceProcessing(true);
@@ -934,7 +940,11 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
-            audio_service_.ResetDecoder();
+            // Only flush the audio queue when media/video isn't using it for playback pacing.
+            if (VideoPlayer::GetInstance().GetState() == VideoPlayer::State::kIdle &&
+                MediaPlayer::GetInstance().GetState() == MediaPlayer::State::kIdle) {
+                audio_service_.ResetDecoder();
+            }
             break;
         case kDeviceStateWifiConfiguring:
             audio_service_.EnableVoiceProcessing(false);

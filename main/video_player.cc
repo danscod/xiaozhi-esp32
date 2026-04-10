@@ -343,6 +343,13 @@ void VideoPlayer::VideoStreamTask(void* arg) {
         self->state_ = State::kPlaying;
     }
 
+    ESP_LOGI(TAG, "VideoStreamTask: screen created, video_img_obj_=%p", self->video_img_obj_);
+
+    // Disable wake word detection to prevent the video's speaker audio from
+    // feeding back through the microphone and triggering state changes that
+    // call ResetDecoder(), which breaks the audio backpressure clock.
+    Application::GetInstance().GetAudioService().EnableWakeWordDetection(false);
+
     ESP_LOGI(TAG, "Streaming video: %s", self->stream_url_.c_str());
 
     auto& board   = Board::GetInstance();
@@ -357,6 +364,7 @@ void VideoPlayer::VideoStreamTask(void* arg) {
         heap_caps_free(jpeg_buf);
         self->state_ = State::kError;
         self->error_msg_ = "network error";
+        Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
         Application::GetInstance().Schedule([self]() { self->StopPlayback(); });
         self->stream_task_handle_ = nullptr;
         vTaskDelete(nullptr);
@@ -369,6 +377,7 @@ void VideoPlayer::VideoStreamTask(void* arg) {
         heap_caps_free(jpeg_buf);
         self->state_ = State::kError;
         self->error_msg_ = "HTTP " + std::to_string(code);
+        Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
         Application::GetInstance().Schedule([self]() { self->StopPlayback(); });
         self->stream_task_handle_ = nullptr;
         vTaskDelete(nullptr);
@@ -443,6 +452,9 @@ void VideoPlayer::VideoStreamTask(void* arg) {
             esp_err_t ret = jpeg_to_image(jpeg_buf, (size_t)flen,
                                           &decoded, &dec_len, &w, &h, &stride);
             if (ret == ESP_OK && decoded && dec_len <= kFrameBytes) {
+                if (total_frames == 0) {
+                    ESP_LOGI(TAG, "First frame decoded: %zux%zu stride=%zu dec_len=%zu", w, h, stride, dec_len);
+                }
                 memcpy(decode_buf, decoded, dec_len);
                 heap_caps_free(decoded);
 
@@ -457,7 +469,8 @@ void VideoPlayer::VideoStreamTask(void* arg) {
                 }
             } else {
                 if (decoded) heap_caps_free(decoded);
-                ESP_LOGW(TAG, "JPEG decode failed (ret=%d, len=%zu)", ret, dec_len);
+                ESP_LOGE(TAG, "JPEG decode FAILED frame %zu: ret=%d flen=%" PRIu32 " dec_len=%zu",
+                         total_frames, ret, flen, dec_len);
             }
             total_frames++;
 
@@ -480,6 +493,9 @@ stream_done:
 
     ESP_LOGI(TAG, "VideoStreamTask: %zu frames rendered (stopped=%d)",
              total_frames, (int)self->stop_requested_.load());
+
+    // Re-enable wake word detection that was suppressed during video playback.
+    Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
 
     Application::GetInstance().Schedule([self]() { self->StopPlayback(); });
     self->stream_task_handle_ = nullptr;
