@@ -8,12 +8,14 @@
 #include "audio/audio_service.h"
 #include "display/display.h"
 #include "display/lvgl_display/jpg/jpeg_to_image.h"
+#include "telemetry.h"
 
 #include <lvgl.h>
 #include <esp_timer.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <cJSON.h>
+#include <algorithm>
 #include <cstring>
 
 #define TAG "VideoPlayer"
@@ -37,6 +39,34 @@ void VideoPlayer::MaybeFinishPlayback() {
                          render_task_handle_ == nullptr);
     }
     if (should_finish) {
+        if (!playback_stats_reported_) {
+            playback_stats_reported_ = true;
+            int duration_ms = playback_stats_.start_us > 0
+                ? static_cast<int>((esp_timer_get_time() - playback_stats_.start_us) / 1000)
+                : 0;
+            Telemetry::GetInstance().PostVideoPlaybackStats(
+                current_id_,
+                current_title_,
+                duration_ms,
+                static_cast<int>(playback_stats_.rendered_frames),
+                static_cast<int>(playback_stats_.dropped_frames),
+                static_cast<int>(playback_stats_.http_read_stalls),
+                static_cast<int>(playback_stats_.max_http_read_stall_us / 1000),
+                static_cast<int>(playback_stats_.audio_push_block_count),
+                static_cast<int>(playback_stats_.max_audio_push_block_us / 1000),
+                static_cast<int>(playback_stats_.late_frame_count),
+                static_cast<int>(playback_stats_.max_frame_late_us / 1000));
+            ESP_LOGI(TAG,
+                     "Playback stats: rendered=%zu dropped=%zu http_stalls=%zu max_http_ms=%lld "
+                     "audio_push_blocks=%zu max_audio_push_ms=%lld late_frames=%zu max_late_ms=%lld",
+                     playback_stats_.rendered_frames, playback_stats_.dropped_frames,
+                     playback_stats_.http_read_stalls,
+                     (long long)(playback_stats_.max_http_read_stall_us / 1000),
+                     playback_stats_.audio_push_block_count,
+                     (long long)(playback_stats_.max_audio_push_block_us / 1000),
+                     playback_stats_.late_frame_count,
+                     (long long)(playback_stats_.max_frame_late_us / 1000));
+        }
         Application::GetInstance().Schedule([this]() { StopPlayback(); });
     }
 }
@@ -110,6 +140,22 @@ void VideoPlayer::RegisterMcpTools() {
             cJSON_AddStringToObject(root, "state",         state_str);
             cJSON_AddStringToObject(root, "current_id",    current_id_.c_str());
             cJSON_AddStringToObject(root, "current_title", current_title_.c_str());
+            cJSON_AddNumberToObject(root, "rendered_frames",
+                                    static_cast<double>(playback_stats_.rendered_frames));
+            cJSON_AddNumberToObject(root, "dropped_frames",
+                                    static_cast<double>(playback_stats_.dropped_frames));
+            cJSON_AddNumberToObject(root, "http_read_stalls",
+                                    static_cast<double>(playback_stats_.http_read_stalls));
+            cJSON_AddNumberToObject(root, "max_http_read_stall_ms",
+                                    static_cast<double>(playback_stats_.max_http_read_stall_us / 1000));
+            cJSON_AddNumberToObject(root, "audio_push_block_count",
+                                    static_cast<double>(playback_stats_.audio_push_block_count));
+            cJSON_AddNumberToObject(root, "max_audio_push_block_ms",
+                                    static_cast<double>(playback_stats_.max_audio_push_block_us / 1000));
+            cJSON_AddNumberToObject(root, "late_frame_count",
+                                    static_cast<double>(playback_stats_.late_frame_count));
+            cJSON_AddNumberToObject(root, "max_frame_late_ms",
+                                    static_cast<double>(playback_stats_.max_frame_late_us / 1000));
             if (state_ == State::kError) {
                 cJSON_AddStringToObject(root, "error", error_msg_.c_str());
             }
@@ -202,11 +248,14 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
         render_failed_.store(false);
         dropped_frames_ = 0;
         playback_start_us_ = 0;
+        playback_stats_ = {};
+        playback_stats_.start_us = esp_timer_get_time();
+        playback_stats_reported_ = false;
         state_ = State::kLoading;
         UpdateDisplay();
         Application::GetInstance().EndVoiceSessionForMedia();
 
-        xTaskCreate(StreamReaderTask, "video_stream", 20480, this, 2,
+        xTaskCreate(StreamReaderTask, "video_stream", 20480, this, 4,
                     &stream_task_handle_);
         xTaskCreate(VideoRenderTask, "video_render", 20480, this, 2,
                     &render_task_handle_);
@@ -243,6 +292,8 @@ void VideoPlayer::StopPlayback() {
         video_queue_.clear();
         playback_start_us_ = 0;
         dropped_frames_ = 0;
+        playback_stats_ = {};
+        playback_stats_reported_ = false;
     }
     stop_requested_.store(false);
     paused_.store(false);
@@ -416,6 +467,17 @@ void VideoPlayer::StreamReaderTask(void* arg) {
     }
 
     auto& audio = Application::GetInstance().GetAudioService();
+    auto read_with_stats = [self, &http](uint8_t* dst, int len) -> int {
+        int64_t read_start_us = esp_timer_get_time();
+        int n = http->Read(reinterpret_cast<char*>(dst), len);
+        int64_t read_elapsed_us = esp_timer_get_time() - read_start_us;
+        if (read_elapsed_us >= kHttpReadStallWarnUs) {
+            self->playback_stats_.http_read_stalls++;
+            self->playback_stats_.max_http_read_stall_us =
+                std::max(self->playback_stats_.max_http_read_stall_us, read_elapsed_us);
+        }
+        return n;
+    };
 
     // Binary frame header: 4× uint32_t big-endian.
     uint8_t hdr[16];
@@ -433,7 +495,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         // Read 16-byte frame header.
         int got = 0;
         while (got < 16 && !self->stop_requested_.load()) {
-            int n = http->Read(reinterpret_cast<char*>(hdr + got), 16 - got);
+            int n = read_with_stats(hdr + got, 16 - got);
             if (n <= 0) goto stream_done;
             got += n;
         }
@@ -461,7 +523,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         // Read payload.
         uint32_t read = 0;
         while (read < flen && !self->stop_requested_.load()) {
-            int n = http->Read(reinterpret_cast<char*>(jpeg_buf + read), (int)(flen - read));
+            int n = read_with_stats(jpeg_buf + read, (int)(flen - read));
             if (n <= 0) goto stream_done;
             read += (uint32_t)n;
         }
@@ -477,6 +539,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
                 if (self->video_queue_.size() >= kMaxQueuedVideoFrames) {
                     self->video_queue_.pop_front();
                     self->dropped_frames_++;
+                    self->playback_stats_.dropped_frames = self->dropped_frames_;
                 }
                 self->video_queue_.push_back(std::move(frame));
                 self->video_queue_cv_.notify_all();
@@ -488,7 +551,14 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             packet->frame_duration = 60;
             packet->timestamp      = ts_ms;
             packet->payload.assign(jpeg_buf, jpeg_buf + flen);
+            int64_t push_start_us = esp_timer_get_time();
             audio.PushPacketToDecodeQueue(std::move(packet), true);
+            int64_t push_elapsed_us = esp_timer_get_time() - push_start_us;
+            if (push_elapsed_us >= kAudioPushBlockWarnUs) {
+                self->playback_stats_.audio_push_block_count++;
+                self->playback_stats_.max_audio_push_block_us =
+                    std::max(self->playback_stats_.max_audio_push_block_us, push_elapsed_us);
+            }
 
             {
                 std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
@@ -524,6 +594,7 @@ stream_done:
     }
     ESP_LOGI(TAG, "StreamReaderTask: queued=%zu dropped=%zu stopped=%d",
              queued_frames, self->dropped_frames_, (int)self->stop_requested_.load());
+    self->playback_stats_.dropped_frames = self->dropped_frames_;
     self->MaybeFinishPlayback();
     vTaskDelete(nullptr);
 }
@@ -601,6 +672,7 @@ void VideoPlayer::VideoRenderTask(void* arg) {
 
             if (self->video_queue_.size() > 1) {
                 self->dropped_frames_ += self->video_queue_.size() - 1;
+                self->playback_stats_.dropped_frames = self->dropped_frames_;
             }
             frame = std::move(self->video_queue_.back());
             self->video_queue_.clear();
@@ -620,8 +692,12 @@ void VideoPlayer::VideoRenderTask(void* arg) {
             int64_t sleep_us = target_us - now_us;
             vTaskDelay(pdMS_TO_TICKS((sleep_us + 999) / 1000));
         } else if (target_us + kLateFrameDropUs < now_us) {
+            int64_t late_us = now_us - target_us;
+            self->playback_stats_.late_frame_count++;
+            self->playback_stats_.max_frame_late_us =
+                std::max(self->playback_stats_.max_frame_late_us, late_us);
             ESP_LOGD(TAG, "Rendering late frame immediately (late=%lld ms)",
-                     (long long)((now_us - target_us) / 1000));
+                     (long long)(late_us / 1000));
         }
 
         uint8_t* decode_buf = self->buf_a_is_display_ ? self->frame_buf_b_ : self->frame_buf_a_;
@@ -646,6 +722,7 @@ void VideoPlayer::VideoRenderTask(void* arg) {
             lv_image_set_src(static_cast<lv_obj_t*>(self->video_img_obj_), &frame_dsc);
             lv_obj_invalidate(static_cast<lv_obj_t*>(self->video_img_obj_));
             rendered_frames++;
+            self->playback_stats_.rendered_frames = rendered_frames;
         }
     }
 

@@ -75,6 +75,18 @@ private:
         std::vector<uint8_t> jpeg;
     };
 
+    struct PlaybackStats {
+        int64_t start_us = 0;
+        size_t rendered_frames = 0;
+        size_t dropped_frames = 0;
+        size_t http_read_stalls = 0;
+        int64_t max_http_read_stall_us = 0;
+        size_t audio_push_block_count = 0;
+        int64_t max_audio_push_block_us = 0;
+        size_t late_frame_count = 0;
+        int64_t max_frame_late_us = 0;
+    };
+
     static void StreamReaderTask(void* arg);
     static void VideoRenderTask(void* arg);
 
@@ -98,6 +110,8 @@ private:
     std::deque<std::unique_ptr<QueuedVideoFrame>> video_queue_;
     int64_t playback_start_us_ = 0;
     size_t dropped_frames_ = 0;
+    PlaybackStats playback_stats_;
+    bool playback_stats_reported_ = false;
 
     // PSRAM framebuffers — allocated in VideoStreamTask, freed in StopPlayback.
     uint8_t* frame_buf_a_ = nullptr;   // currently on display
@@ -119,7 +133,9 @@ private:
     static constexpr size_t   kFrameH        = 240;
     static constexpr size_t   kFrameBytes    = kFrameW * kFrameH * 2;  // RGB565
     static constexpr size_t   kJpegBufSize   = 32 * 1024;              // 32 KB max JPEG
-    static constexpr size_t   kMaxQueuedVideoFrames = 6;
-    static constexpr size_t   kAudioPrebufferPackets = 2;              // 120 ms
+    static constexpr size_t   kMaxQueuedVideoFrames = 10;
+    static constexpr size_t   kAudioPrebufferPackets = 4;              // 240 ms
     static constexpr int64_t  kLateFrameDropUs = 500000;               // allow a wider sync window
+    static constexpr int64_t  kHttpReadStallWarnUs = 80000;            // >80 ms read gap
+    static constexpr int64_t  kAudioPushBlockWarnUs = 20000;           // >20 ms queue wait
 };
