@@ -531,6 +531,8 @@ void VideoPlayer::StreamReaderTask(void* arg) {
 
     auto& board   = Board::GetInstance();
     auto  network = board.GetNetwork();
+    std::unique_ptr<Http> legacy_http;
+    bool using_legacy_stream = false;
 
     auto& audio = Application::GetInstance().GetAudioService();
     auto record_http_gap = [self](int64_t elapsed_us) {
@@ -594,6 +596,13 @@ void VideoPlayer::StreamReaderTask(void* arg) {
                 ESP_LOGE(TAG, "Range fetch returned HTTP %d at offset %zu", code, start_offset);
                 http->Close();
                 break;
+            }
+
+            if (code == 200 && start_offset == 0) {
+                ESP_LOGW(TAG, "Server ignored Range header; falling back to legacy stream mode");
+                legacy_http = std::move(http);
+                using_legacy_stream = true;
+                return true;
             }
 
             size_t body_len = http->GetBodyLength();
@@ -661,6 +670,13 @@ void VideoPlayer::StreamReaderTask(void* arg) {
     };
 
     auto read_with_stats = [&](uint8_t* dst, int len) -> int {
+        if (using_legacy_stream && legacy_http) {
+            int64_t read_start_us = esp_timer_get_time();
+            int n = legacy_http->Read(reinterpret_cast<char*>(dst), len);
+            record_http_gap(esp_timer_get_time() - read_start_us);
+            return n;
+        }
+
         int total = 0;
         while (total < len && !self->stop_requested_.load()) {
             if (range_buf_offset >= range_buf_size) {
@@ -785,6 +801,10 @@ void VideoPlayer::StreamReaderTask(void* arg) {
     }
 
 stream_done:
+    if (legacy_http) {
+        legacy_http->Close();
+        legacy_http.reset();
+    }
     heap_caps_free(jpeg_buf);
     heap_caps_free(range_buf);
 
