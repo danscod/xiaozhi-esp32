@@ -166,64 +166,134 @@ void Telemetry::PostEventAsync(const char* event_type, int conversation_duration
     );
 }
 
-void Telemetry::PostVideoPlaybackStats(
-        const std::string& item_id,
-        const std::string& title,
-        int duration_ms,
-        int rendered_frames,
-        int dropped_frames,
-        int http_read_stalls,
-        int max_http_read_stall_ms,
-        int audio_push_block_count,
-        int max_audio_push_block_ms,
-        int late_frame_count,
-        int max_frame_late_ms) {
+void Telemetry::PostVideoPlaybackStats(const VideoPlaybackTelemetry& telemetry) {
     PostEventAsync("video_playback_end", 0,
-        [item_id, title, duration_ms, rendered_frames, dropped_frames, http_read_stalls,
-         max_http_read_stall_ms, audio_push_block_count, max_audio_push_block_ms,
-         late_frame_count, max_frame_late_ms](cJSON* root) {
-            cJSON_AddStringToObject(root, "item_id", item_id.c_str());
-            cJSON_AddStringToObject(root, "title", title.c_str());
-            cJSON_AddNumberToObject(root, "playback_duration_ms", duration_ms);
-            cJSON_AddNumberToObject(root, "rendered_frames", rendered_frames);
-            cJSON_AddNumberToObject(root, "dropped_frames", dropped_frames);
-            cJSON_AddNumberToObject(root, "http_read_stalls", http_read_stalls);
-            cJSON_AddNumberToObject(root, "max_http_read_stall_ms", max_http_read_stall_ms);
-            cJSON_AddNumberToObject(root, "audio_push_block_count", audio_push_block_count);
-            cJSON_AddNumberToObject(root, "max_audio_push_block_ms", max_audio_push_block_ms);
-            cJSON_AddNumberToObject(root, "late_frame_count", late_frame_count);
-            cJSON_AddNumberToObject(root, "max_frame_late_ms", max_frame_late_ms);
+        [telemetry](cJSON* root) {
+            cJSON_AddStringToObject(root, "item_id", telemetry.item_id.c_str());
+            cJSON_AddStringToObject(root, "title", telemetry.title.c_str());
+            cJSON_AddStringToObject(root, "end_reason", telemetry.end_reason.c_str());
+            cJSON_AddNumberToObject(root, "playback_duration_ms", telemetry.duration_ms);
+            cJSON_AddNumberToObject(root, "queued_video_frames", telemetry.queued_video_frames);
+            cJSON_AddNumberToObject(root, "rendered_frames", telemetry.rendered_frames);
+            cJSON_AddNumberToObject(root, "dropped_frames", telemetry.dropped_frames);
+            cJSON_AddNumberToObject(root, "queue_overflow_drop_count", telemetry.queue_overflow_drop_count);
+            cJSON_AddNumberToObject(root, "render_backlog_drop_count", telemetry.render_backlog_drop_count);
+            cJSON_AddNumberToObject(root, "max_queued_video_frames", telemetry.max_queued_video_frames);
+            cJSON_AddNumberToObject(root, "http_status_code", telemetry.http_status_code);
+            cJSON_AddNumberToObject(root, "http_read_calls", telemetry.http_read_calls);
+            cJSON_AddNumberToObject(root, "http_read_short_calls", telemetry.http_read_short_calls);
+            cJSON_AddNumberToObject(root, "http_zero_reads", telemetry.http_zero_reads);
+            cJSON_AddNumberToObject(root, "http_header_read_calls", telemetry.http_header_read_calls);
+            cJSON_AddNumberToObject(root, "http_payload_read_calls", telemetry.http_payload_read_calls);
+            cJSON_AddNumberToObject(root, "http_read_stalls", telemetry.http_read_stalls);
+            cJSON_AddNumberToObject(root, "audio_packets_seen", telemetry.audio_packets_seen);
+            cJSON_AddNumberToObject(root, "video_frames_seen", telemetry.video_frames_seen);
+            cJSON_AddNumberToObject(root, "video_frames_decode_attempted", telemetry.video_frames_decode_attempted);
+            cJSON_AddNumberToObject(root, "video_frames_decode_failed", telemetry.video_frames_decode_failed);
+            cJSON_AddNumberToObject(root, "video_frames_presented", telemetry.video_frames_presented);
+            cJSON_AddNumberToObject(root, "render_wakeups", telemetry.render_wakeups);
+            cJSON_AddNumberToObject(root, "render_empty_queue_wakeups", telemetry.render_empty_queue_wakeups);
+            cJSON_AddNumberToObject(root, "max_http_read_stall_ms", telemetry.max_http_read_stall_ms);
+            cJSON_AddNumberToObject(root, "max_http_read_ms", telemetry.max_http_read_ms);
+            cJSON_AddNumberToObject(root, "audio_push_block_count", telemetry.audio_push_block_count);
+            cJSON_AddNumberToObject(root, "max_audio_push_block_ms", telemetry.max_audio_push_block_ms);
+            cJSON_AddNumberToObject(root, "max_audio_push_ms", telemetry.max_audio_push_ms);
+            cJSON_AddNumberToObject(root, "max_audio_packet_copy_ms", telemetry.max_audio_packet_copy_ms);
+            cJSON_AddNumberToObject(root, "max_video_frame_copy_ms", telemetry.max_video_frame_copy_ms);
+            cJSON_AddNumberToObject(root, "max_render_queue_wait_ms", telemetry.max_render_queue_wait_ms);
+            cJSON_AddNumberToObject(root, "max_render_schedule_sleep_ms", telemetry.max_render_schedule_sleep_ms);
+            cJSON_AddNumberToObject(root, "late_frame_count", telemetry.late_frame_count);
+            cJSON_AddNumberToObject(root, "max_frame_late_ms", telemetry.max_frame_late_ms);
+            cJSON_AddNumberToObject(root, "max_frame_age_before_decode_ms", telemetry.max_frame_age_before_decode_ms);
+            cJSON_AddNumberToObject(root, "max_frame_age_after_present_ms", telemetry.max_frame_age_after_present_ms);
+            cJSON_AddNumberToObject(root, "max_jpeg_decode_ms", telemetry.max_jpeg_decode_ms);
+            cJSON_AddNumberToObject(root, "max_frame_present_ms", telemetry.max_frame_present_ms);
+            cJSON_AddNumberToObject(root, "http_open_time_ms", telemetry.http_open_time_ms);
+            cJSON_AddNumberToObject(root, "first_audio_packet_ms", telemetry.first_audio_packet_ms);
+            cJSON_AddNumberToObject(root, "first_video_frame_ms", telemetry.first_video_frame_ms);
+            cJSON_AddNumberToObject(root, "playback_started_ms", telemetry.playback_started_ms);
+            cJSON_AddNumberToObject(root, "first_frame_presented_ms", telemetry.first_frame_presented_ms);
+            cJSON_AddNumberToObject(root, "http_read_bytes", static_cast<double>(telemetry.http_read_bytes));
+            cJSON_AddNumberToObject(root, "audio_bytes_seen", static_cast<double>(telemetry.audio_bytes_seen));
+            cJSON_AddNumberToObject(root, "video_bytes_seen", static_cast<double>(telemetry.video_bytes_seen));
+            cJSON_AddNumberToObject(root, "http_read_time_us_total", static_cast<double>(telemetry.http_read_time_us_total));
+            cJSON_AddNumberToObject(root, "header_read_time_us_total", static_cast<double>(telemetry.header_read_time_us_total));
+            cJSON_AddNumberToObject(root, "payload_read_time_us_total", static_cast<double>(telemetry.payload_read_time_us_total));
+            cJSON_AddNumberToObject(root, "audio_packet_copy_time_us_total", static_cast<double>(telemetry.audio_packet_copy_time_us_total));
+            cJSON_AddNumberToObject(root, "video_frame_copy_time_us_total", static_cast<double>(telemetry.video_frame_copy_time_us_total));
+            cJSON_AddNumberToObject(root, "audio_push_time_us_total", static_cast<double>(telemetry.audio_push_time_us_total));
+            cJSON_AddNumberToObject(root, "render_queue_wait_us_total", static_cast<double>(telemetry.render_queue_wait_us_total));
+            cJSON_AddNumberToObject(root, "render_schedule_sleep_us_total", static_cast<double>(telemetry.render_schedule_sleep_us_total));
+            cJSON_AddNumberToObject(root, "total_frame_late_us", static_cast<double>(telemetry.total_frame_late_us));
+            cJSON_AddNumberToObject(root, "total_frame_age_before_decode_us", static_cast<double>(telemetry.total_frame_age_before_decode_us));
+            cJSON_AddNumberToObject(root, "total_frame_age_after_present_us", static_cast<double>(telemetry.total_frame_age_after_present_us));
+            cJSON_AddNumberToObject(root, "jpeg_decode_time_us_total", static_cast<double>(telemetry.jpeg_decode_time_us_total));
+            cJSON_AddNumberToObject(root, "frame_present_time_us_total", static_cast<double>(telemetry.frame_present_time_us_total));
         });
 }
 
-void Telemetry::PostVideoPlaybackProgress(
-        const std::string& item_id,
-        const std::string& title,
-        int duration_ms,
-        int rendered_frames,
-        int dropped_frames,
-        int http_read_stalls,
-        int max_http_read_stall_ms,
-        int audio_push_block_count,
-        int max_audio_push_block_ms,
-        int late_frame_count,
-        int max_frame_late_ms,
-        int queued_video_frames) {
+void Telemetry::PostVideoPlaybackProgress(const VideoPlaybackTelemetry& telemetry) {
     PostEventAsync("video_playback_progress", 0,
-        [item_id, title, duration_ms, rendered_frames, dropped_frames, http_read_stalls,
-         max_http_read_stall_ms, audio_push_block_count, max_audio_push_block_ms,
-         late_frame_count, max_frame_late_ms, queued_video_frames](cJSON* root) {
-            cJSON_AddStringToObject(root, "item_id", item_id.c_str());
-            cJSON_AddStringToObject(root, "title", title.c_str());
-            cJSON_AddNumberToObject(root, "playback_duration_ms", duration_ms);
-            cJSON_AddNumberToObject(root, "rendered_frames", rendered_frames);
-            cJSON_AddNumberToObject(root, "dropped_frames", dropped_frames);
-            cJSON_AddNumberToObject(root, "http_read_stalls", http_read_stalls);
-            cJSON_AddNumberToObject(root, "max_http_read_stall_ms", max_http_read_stall_ms);
-            cJSON_AddNumberToObject(root, "audio_push_block_count", audio_push_block_count);
-            cJSON_AddNumberToObject(root, "max_audio_push_block_ms", max_audio_push_block_ms);
-            cJSON_AddNumberToObject(root, "late_frame_count", late_frame_count);
-            cJSON_AddNumberToObject(root, "max_frame_late_ms", max_frame_late_ms);
-            cJSON_AddNumberToObject(root, "queued_video_frames", queued_video_frames);
+        [telemetry](cJSON* root) {
+            cJSON_AddStringToObject(root, "item_id", telemetry.item_id.c_str());
+            cJSON_AddStringToObject(root, "title", telemetry.title.c_str());
+            cJSON_AddStringToObject(root, "end_reason", telemetry.end_reason.c_str());
+            cJSON_AddNumberToObject(root, "playback_duration_ms", telemetry.duration_ms);
+            cJSON_AddNumberToObject(root, "queued_video_frames", telemetry.queued_video_frames);
+            cJSON_AddNumberToObject(root, "rendered_frames", telemetry.rendered_frames);
+            cJSON_AddNumberToObject(root, "dropped_frames", telemetry.dropped_frames);
+            cJSON_AddNumberToObject(root, "queue_overflow_drop_count", telemetry.queue_overflow_drop_count);
+            cJSON_AddNumberToObject(root, "render_backlog_drop_count", telemetry.render_backlog_drop_count);
+            cJSON_AddNumberToObject(root, "max_queued_video_frames", telemetry.max_queued_video_frames);
+            cJSON_AddNumberToObject(root, "http_status_code", telemetry.http_status_code);
+            cJSON_AddNumberToObject(root, "http_read_calls", telemetry.http_read_calls);
+            cJSON_AddNumberToObject(root, "http_read_short_calls", telemetry.http_read_short_calls);
+            cJSON_AddNumberToObject(root, "http_zero_reads", telemetry.http_zero_reads);
+            cJSON_AddNumberToObject(root, "http_header_read_calls", telemetry.http_header_read_calls);
+            cJSON_AddNumberToObject(root, "http_payload_read_calls", telemetry.http_payload_read_calls);
+            cJSON_AddNumberToObject(root, "http_read_stalls", telemetry.http_read_stalls);
+            cJSON_AddNumberToObject(root, "audio_packets_seen", telemetry.audio_packets_seen);
+            cJSON_AddNumberToObject(root, "video_frames_seen", telemetry.video_frames_seen);
+            cJSON_AddNumberToObject(root, "video_frames_decode_attempted", telemetry.video_frames_decode_attempted);
+            cJSON_AddNumberToObject(root, "video_frames_decode_failed", telemetry.video_frames_decode_failed);
+            cJSON_AddNumberToObject(root, "video_frames_presented", telemetry.video_frames_presented);
+            cJSON_AddNumberToObject(root, "render_wakeups", telemetry.render_wakeups);
+            cJSON_AddNumberToObject(root, "render_empty_queue_wakeups", telemetry.render_empty_queue_wakeups);
+            cJSON_AddNumberToObject(root, "max_http_read_stall_ms", telemetry.max_http_read_stall_ms);
+            cJSON_AddNumberToObject(root, "max_http_read_ms", telemetry.max_http_read_ms);
+            cJSON_AddNumberToObject(root, "audio_push_block_count", telemetry.audio_push_block_count);
+            cJSON_AddNumberToObject(root, "max_audio_push_block_ms", telemetry.max_audio_push_block_ms);
+            cJSON_AddNumberToObject(root, "max_audio_push_ms", telemetry.max_audio_push_ms);
+            cJSON_AddNumberToObject(root, "max_audio_packet_copy_ms", telemetry.max_audio_packet_copy_ms);
+            cJSON_AddNumberToObject(root, "max_video_frame_copy_ms", telemetry.max_video_frame_copy_ms);
+            cJSON_AddNumberToObject(root, "max_render_queue_wait_ms", telemetry.max_render_queue_wait_ms);
+            cJSON_AddNumberToObject(root, "max_render_schedule_sleep_ms", telemetry.max_render_schedule_sleep_ms);
+            cJSON_AddNumberToObject(root, "late_frame_count", telemetry.late_frame_count);
+            cJSON_AddNumberToObject(root, "max_frame_late_ms", telemetry.max_frame_late_ms);
+            cJSON_AddNumberToObject(root, "max_frame_age_before_decode_ms", telemetry.max_frame_age_before_decode_ms);
+            cJSON_AddNumberToObject(root, "max_frame_age_after_present_ms", telemetry.max_frame_age_after_present_ms);
+            cJSON_AddNumberToObject(root, "max_jpeg_decode_ms", telemetry.max_jpeg_decode_ms);
+            cJSON_AddNumberToObject(root, "max_frame_present_ms", telemetry.max_frame_present_ms);
+            cJSON_AddNumberToObject(root, "http_open_time_ms", telemetry.http_open_time_ms);
+            cJSON_AddNumberToObject(root, "first_audio_packet_ms", telemetry.first_audio_packet_ms);
+            cJSON_AddNumberToObject(root, "first_video_frame_ms", telemetry.first_video_frame_ms);
+            cJSON_AddNumberToObject(root, "playback_started_ms", telemetry.playback_started_ms);
+            cJSON_AddNumberToObject(root, "first_frame_presented_ms", telemetry.first_frame_presented_ms);
+            cJSON_AddNumberToObject(root, "http_read_bytes", static_cast<double>(telemetry.http_read_bytes));
+            cJSON_AddNumberToObject(root, "audio_bytes_seen", static_cast<double>(telemetry.audio_bytes_seen));
+            cJSON_AddNumberToObject(root, "video_bytes_seen", static_cast<double>(telemetry.video_bytes_seen));
+            cJSON_AddNumberToObject(root, "http_read_time_us_total", static_cast<double>(telemetry.http_read_time_us_total));
+            cJSON_AddNumberToObject(root, "header_read_time_us_total", static_cast<double>(telemetry.header_read_time_us_total));
+            cJSON_AddNumberToObject(root, "payload_read_time_us_total", static_cast<double>(telemetry.payload_read_time_us_total));
+            cJSON_AddNumberToObject(root, "audio_packet_copy_time_us_total", static_cast<double>(telemetry.audio_packet_copy_time_us_total));
+            cJSON_AddNumberToObject(root, "video_frame_copy_time_us_total", static_cast<double>(telemetry.video_frame_copy_time_us_total));
+            cJSON_AddNumberToObject(root, "audio_push_time_us_total", static_cast<double>(telemetry.audio_push_time_us_total));
+            cJSON_AddNumberToObject(root, "render_queue_wait_us_total", static_cast<double>(telemetry.render_queue_wait_us_total));
+            cJSON_AddNumberToObject(root, "render_schedule_sleep_us_total", static_cast<double>(telemetry.render_schedule_sleep_us_total));
+            cJSON_AddNumberToObject(root, "total_frame_late_us", static_cast<double>(telemetry.total_frame_late_us));
+            cJSON_AddNumberToObject(root, "total_frame_age_before_decode_us", static_cast<double>(telemetry.total_frame_age_before_decode_us));
+            cJSON_AddNumberToObject(root, "total_frame_age_after_present_us", static_cast<double>(telemetry.total_frame_age_after_present_us));
+            cJSON_AddNumberToObject(root, "jpeg_decode_time_us_total", static_cast<double>(telemetry.jpeg_decode_time_us_total));
+            cJSON_AddNumberToObject(root, "frame_present_time_us_total", static_cast<double>(telemetry.frame_present_time_us_total));
         });
 }

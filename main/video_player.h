@@ -11,6 +11,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include "telemetry.h"
+
 /**
  * VideoPlayer — MJPEG+Opus video playback with MCP tool integration.
  *
@@ -70,6 +72,8 @@ private:
     void UpdateDisplay();
     void MaybePostPlaybackProgress();
     void MaybeFinishPlayback();
+    VideoPlaybackTelemetry BuildTelemetrySnapshot(int duration_ms, int queued_video_frames) const;
+    void SetPlaybackEndReason(const char* reason);
 
     struct QueuedVideoFrame {
         uint32_t ts_ms = 0;
@@ -80,12 +84,59 @@ private:
         int64_t start_us = 0;
         size_t rendered_frames = 0;
         size_t dropped_frames = 0;
+        size_t queue_overflow_drop_count = 0;
+        size_t render_backlog_drop_count = 0;
+        size_t max_queued_video_frames = 0;
+        int http_status_code = 0;
+        size_t http_read_calls = 0;
+        size_t http_read_short_calls = 0;
+        size_t http_zero_reads = 0;
+        size_t http_header_read_calls = 0;
+        size_t http_payload_read_calls = 0;
         size_t http_read_stalls = 0;
+        int64_t http_read_bytes = 0;
+        int64_t http_read_time_us_total = 0;
+        int64_t header_read_time_us_total = 0;
+        int64_t payload_read_time_us_total = 0;
+        int64_t http_open_time_us = 0;
+        int64_t max_http_read_us = 0;
         int64_t max_http_read_stall_us = 0;
+        size_t audio_packets_seen = 0;
+        int64_t audio_bytes_seen = 0;
+        int64_t audio_packet_copy_time_us_total = 0;
+        int64_t max_audio_packet_copy_us = 0;
         size_t audio_push_block_count = 0;
+        int64_t audio_push_time_us_total = 0;
+        int64_t max_audio_push_us = 0;
         int64_t max_audio_push_block_us = 0;
+        size_t video_frames_seen = 0;
+        int64_t video_bytes_seen = 0;
+        int64_t video_frame_copy_time_us_total = 0;
+        int64_t max_video_frame_copy_us = 0;
+        size_t video_frames_decode_attempted = 0;
+        size_t video_frames_decode_failed = 0;
+        size_t video_frames_presented = 0;
+        size_t render_wakeups = 0;
+        size_t render_empty_queue_wakeups = 0;
+        int64_t render_queue_wait_us_total = 0;
+        int64_t max_render_queue_wait_us = 0;
+        int64_t render_schedule_sleep_us_total = 0;
+        int64_t max_render_schedule_sleep_us = 0;
         size_t late_frame_count = 0;
+        int64_t total_frame_late_us = 0;
         int64_t max_frame_late_us = 0;
+        int64_t total_frame_age_before_decode_us = 0;
+        int64_t max_frame_age_before_decode_us = 0;
+        int64_t total_frame_age_after_present_us = 0;
+        int64_t max_frame_age_after_present_us = 0;
+        int64_t jpeg_decode_time_us_total = 0;
+        int64_t max_jpeg_decode_us = 0;
+        int64_t frame_present_time_us_total = 0;
+        int64_t max_frame_present_us = 0;
+        int64_t first_audio_packet_us = 0;
+        int64_t first_video_frame_us = 0;
+        int64_t playback_started_us = 0;
+        int64_t first_frame_presented_us = 0;
     };
 
     static void StreamReaderTask(void* arg);
@@ -109,9 +160,11 @@ private:
     std::mutex video_queue_mutex_;
     std::condition_variable video_queue_cv_;
     std::deque<std::unique_ptr<QueuedVideoFrame>> video_queue_;
+    mutable std::mutex playback_stats_mutex_;
     int64_t playback_start_us_ = 0;
     size_t dropped_frames_ = 0;
     PlaybackStats playback_stats_;
+    std::string playback_end_reason_;
     bool playback_stats_reported_ = false;
     std::atomic<int64_t> last_progress_post_us_{0};
 

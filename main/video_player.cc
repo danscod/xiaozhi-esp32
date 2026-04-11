@@ -31,8 +31,99 @@ std::string VideoPlayer::PlayItem(const std::string& item_id) {
     return StartItem(item_id);
 }
 
+VideoPlaybackTelemetry VideoPlayer::BuildTelemetrySnapshot(int duration_ms,
+                                                           int queued_video_frames) const {
+    VideoPlaybackTelemetry telemetry;
+    telemetry.item_id = current_id_;
+    telemetry.title = current_title_;
+    telemetry.duration_ms = duration_ms;
+    telemetry.queued_video_frames = queued_video_frames;
+
+    std::lock_guard<std::mutex> lock(playback_stats_mutex_);
+    telemetry.end_reason = playback_end_reason_;
+    telemetry.rendered_frames = static_cast<int>(playback_stats_.rendered_frames);
+    telemetry.dropped_frames = static_cast<int>(playback_stats_.dropped_frames);
+    telemetry.queue_overflow_drop_count = static_cast<int>(playback_stats_.queue_overflow_drop_count);
+    telemetry.render_backlog_drop_count = static_cast<int>(playback_stats_.render_backlog_drop_count);
+    telemetry.max_queued_video_frames = static_cast<int>(playback_stats_.max_queued_video_frames);
+    telemetry.http_status_code = playback_stats_.http_status_code;
+    telemetry.http_read_calls = static_cast<int>(playback_stats_.http_read_calls);
+    telemetry.http_read_short_calls = static_cast<int>(playback_stats_.http_read_short_calls);
+    telemetry.http_zero_reads = static_cast<int>(playback_stats_.http_zero_reads);
+    telemetry.http_header_read_calls = static_cast<int>(playback_stats_.http_header_read_calls);
+    telemetry.http_payload_read_calls = static_cast<int>(playback_stats_.http_payload_read_calls);
+    telemetry.http_read_stalls = static_cast<int>(playback_stats_.http_read_stalls);
+    telemetry.audio_packets_seen = static_cast<int>(playback_stats_.audio_packets_seen);
+    telemetry.video_frames_seen = static_cast<int>(playback_stats_.video_frames_seen);
+    telemetry.video_frames_decode_attempted = static_cast<int>(playback_stats_.video_frames_decode_attempted);
+    telemetry.video_frames_decode_failed = static_cast<int>(playback_stats_.video_frames_decode_failed);
+    telemetry.video_frames_presented = static_cast<int>(playback_stats_.video_frames_presented);
+    telemetry.render_wakeups = static_cast<int>(playback_stats_.render_wakeups);
+    telemetry.render_empty_queue_wakeups = static_cast<int>(playback_stats_.render_empty_queue_wakeups);
+    telemetry.max_http_read_stall_ms = static_cast<int>(playback_stats_.max_http_read_stall_us / 1000);
+    telemetry.max_http_read_ms = static_cast<int>(playback_stats_.max_http_read_us / 1000);
+    telemetry.audio_push_block_count = static_cast<int>(playback_stats_.audio_push_block_count);
+    telemetry.max_audio_push_block_ms = static_cast<int>(playback_stats_.max_audio_push_block_us / 1000);
+    telemetry.max_audio_push_ms = static_cast<int>(playback_stats_.max_audio_push_us / 1000);
+    telemetry.max_audio_packet_copy_ms = static_cast<int>(playback_stats_.max_audio_packet_copy_us / 1000);
+    telemetry.max_video_frame_copy_ms = static_cast<int>(playback_stats_.max_video_frame_copy_us / 1000);
+    telemetry.max_render_queue_wait_ms = static_cast<int>(playback_stats_.max_render_queue_wait_us / 1000);
+    telemetry.max_render_schedule_sleep_ms =
+        static_cast<int>(playback_stats_.max_render_schedule_sleep_us / 1000);
+    telemetry.late_frame_count = static_cast<int>(playback_stats_.late_frame_count);
+    telemetry.max_frame_late_ms = static_cast<int>(playback_stats_.max_frame_late_us / 1000);
+    telemetry.max_frame_age_before_decode_ms =
+        static_cast<int>(playback_stats_.max_frame_age_before_decode_us / 1000);
+    telemetry.max_frame_age_after_present_ms =
+        static_cast<int>(playback_stats_.max_frame_age_after_present_us / 1000);
+    telemetry.max_jpeg_decode_ms = static_cast<int>(playback_stats_.max_jpeg_decode_us / 1000);
+    telemetry.max_frame_present_ms = static_cast<int>(playback_stats_.max_frame_present_us / 1000);
+    telemetry.http_open_time_ms = playback_stats_.http_open_time_us > 0
+        ? static_cast<int>(playback_stats_.http_open_time_us / 1000)
+        : -1;
+    telemetry.first_audio_packet_ms = playback_stats_.first_audio_packet_us > 0
+        ? static_cast<int>(playback_stats_.first_audio_packet_us / 1000)
+        : -1;
+    telemetry.first_video_frame_ms = playback_stats_.first_video_frame_us > 0
+        ? static_cast<int>(playback_stats_.first_video_frame_us / 1000)
+        : -1;
+    telemetry.playback_started_ms = playback_stats_.playback_started_us > 0
+        ? static_cast<int>(playback_stats_.playback_started_us / 1000)
+        : -1;
+    telemetry.first_frame_presented_ms = playback_stats_.first_frame_presented_us > 0
+        ? static_cast<int>(playback_stats_.first_frame_presented_us / 1000)
+        : -1;
+    telemetry.http_read_bytes = playback_stats_.http_read_bytes;
+    telemetry.audio_bytes_seen = playback_stats_.audio_bytes_seen;
+    telemetry.video_bytes_seen = playback_stats_.video_bytes_seen;
+    telemetry.http_read_time_us_total = playback_stats_.http_read_time_us_total;
+    telemetry.header_read_time_us_total = playback_stats_.header_read_time_us_total;
+    telemetry.payload_read_time_us_total = playback_stats_.payload_read_time_us_total;
+    telemetry.audio_packet_copy_time_us_total = playback_stats_.audio_packet_copy_time_us_total;
+    telemetry.video_frame_copy_time_us_total = playback_stats_.video_frame_copy_time_us_total;
+    telemetry.audio_push_time_us_total = playback_stats_.audio_push_time_us_total;
+    telemetry.render_queue_wait_us_total = playback_stats_.render_queue_wait_us_total;
+    telemetry.render_schedule_sleep_us_total = playback_stats_.render_schedule_sleep_us_total;
+    telemetry.total_frame_late_us = playback_stats_.total_frame_late_us;
+    telemetry.total_frame_age_before_decode_us = playback_stats_.total_frame_age_before_decode_us;
+    telemetry.total_frame_age_after_present_us = playback_stats_.total_frame_age_after_present_us;
+    telemetry.jpeg_decode_time_us_total = playback_stats_.jpeg_decode_time_us_total;
+    telemetry.frame_present_time_us_total = playback_stats_.frame_present_time_us_total;
+    return telemetry;
+}
+
+void VideoPlayer::SetPlaybackEndReason(const char* reason) {
+    std::lock_guard<std::mutex> lock(playback_stats_mutex_);
+    playback_end_reason_ = reason ? reason : "";
+}
+
 void VideoPlayer::MaybePostPlaybackProgress() {
-    if (playback_stats_reported_ || playback_stats_.start_us <= 0 || current_id_.empty()) {
+    int64_t start_us = 0;
+    {
+        std::lock_guard<std::mutex> lock(playback_stats_mutex_);
+        start_us = playback_stats_.start_us;
+    }
+    if (playback_stats_reported_ || start_us <= 0 || current_id_.empty()) {
         return;
     }
 
@@ -49,20 +140,9 @@ void VideoPlayer::MaybePostPlaybackProgress() {
         queued_video_frames = static_cast<int>(video_queue_.size());
     }
 
-    int duration_ms = static_cast<int>((now_us - playback_stats_.start_us) / 1000);
+    int duration_ms = static_cast<int>((now_us - start_us) / 1000);
     Telemetry::GetInstance().PostVideoPlaybackProgress(
-        current_id_,
-        current_title_,
-        duration_ms,
-        static_cast<int>(playback_stats_.rendered_frames),
-        static_cast<int>(playback_stats_.dropped_frames),
-        static_cast<int>(playback_stats_.http_read_stalls),
-        static_cast<int>(playback_stats_.max_http_read_stall_us / 1000),
-        static_cast<int>(playback_stats_.audio_push_block_count),
-        static_cast<int>(playback_stats_.max_audio_push_block_us / 1000),
-        static_cast<int>(playback_stats_.late_frame_count),
-        static_cast<int>(playback_stats_.max_frame_late_us / 1000),
-        queued_video_frames);
+        BuildTelemetrySnapshot(duration_ms, queued_video_frames));
 }
 
 void VideoPlayer::MaybeFinishPlayback() {
@@ -75,31 +155,30 @@ void VideoPlayer::MaybeFinishPlayback() {
     if (should_finish) {
         if (!playback_stats_reported_) {
             playback_stats_reported_ = true;
-            int duration_ms = playback_stats_.start_us > 0
-                ? static_cast<int>((esp_timer_get_time() - playback_stats_.start_us) / 1000)
+            int64_t start_us = 0;
+            {
+                std::lock_guard<std::mutex> lock(playback_stats_mutex_);
+                start_us = playback_stats_.start_us;
+            }
+            int duration_ms = start_us > 0
+                ? static_cast<int>((esp_timer_get_time() - start_us) / 1000)
                 : 0;
-            Telemetry::GetInstance().PostVideoPlaybackStats(
-                current_id_,
-                current_title_,
-                duration_ms,
-                static_cast<int>(playback_stats_.rendered_frames),
-                static_cast<int>(playback_stats_.dropped_frames),
-                static_cast<int>(playback_stats_.http_read_stalls),
-                static_cast<int>(playback_stats_.max_http_read_stall_us / 1000),
-                static_cast<int>(playback_stats_.audio_push_block_count),
-                static_cast<int>(playback_stats_.max_audio_push_block_us / 1000),
-                static_cast<int>(playback_stats_.late_frame_count),
-                static_cast<int>(playback_stats_.max_frame_late_us / 1000));
+            VideoPlaybackTelemetry telemetry = BuildTelemetrySnapshot(duration_ms, 0);
+            Telemetry::GetInstance().PostVideoPlaybackStats(telemetry);
             ESP_LOGI(TAG,
-                     "Playback stats: rendered=%zu dropped=%zu http_stalls=%zu max_http_ms=%lld "
-                     "audio_push_blocks=%zu max_audio_push_ms=%lld late_frames=%zu max_late_ms=%lld",
-                     playback_stats_.rendered_frames, playback_stats_.dropped_frames,
-                     playback_stats_.http_read_stalls,
-                     (long long)(playback_stats_.max_http_read_stall_us / 1000),
-                     playback_stats_.audio_push_block_count,
-                     (long long)(playback_stats_.max_audio_push_block_us / 1000),
-                     playback_stats_.late_frame_count,
-                     (long long)(playback_stats_.max_frame_late_us / 1000));
+                     "Playback stats: rendered=%d dropped=%d http_calls=%d http_stalls=%d "
+                     "decode_attempts=%d decode_failures=%d present=%d max_decode_ms=%d "
+                     "max_present_ms=%d end_reason=%s",
+                     telemetry.rendered_frames,
+                     telemetry.dropped_frames,
+                     telemetry.http_read_calls,
+                     telemetry.http_read_stalls,
+                     telemetry.video_frames_decode_attempted,
+                     telemetry.video_frames_decode_failed,
+                     telemetry.video_frames_presented,
+                     telemetry.max_jpeg_decode_ms,
+                     telemetry.max_frame_present_ms,
+                     telemetry.end_reason.c_str());
         }
         Application::GetInstance().Schedule([this]() { StopPlayback(); });
     }
@@ -171,25 +250,54 @@ void VideoPlayer::RegisterMcpTools() {
                 case State::kError:   state_str = "error";   break;
                 default:              state_str = "idle";    break;
             }
+            int queued_video_frames = 0;
+            {
+                std::lock_guard<std::mutex> lock(video_queue_mutex_);
+                queued_video_frames = static_cast<int>(video_queue_.size());
+            }
+            int64_t start_us = 0;
+            {
+                std::lock_guard<std::mutex> lock(playback_stats_mutex_);
+                start_us = playback_stats_.start_us;
+            }
+            int duration_ms = 0;
+            if (start_us > 0) {
+                duration_ms = static_cast<int>((esp_timer_get_time() - start_us) / 1000);
+            }
+            VideoPlaybackTelemetry telemetry = BuildTelemetrySnapshot(duration_ms, queued_video_frames);
             cJSON_AddStringToObject(root, "state",         state_str);
             cJSON_AddStringToObject(root, "current_id",    current_id_.c_str());
             cJSON_AddStringToObject(root, "current_title", current_title_.c_str());
-            cJSON_AddNumberToObject(root, "rendered_frames",
-                                    static_cast<double>(playback_stats_.rendered_frames));
-            cJSON_AddNumberToObject(root, "dropped_frames",
-                                    static_cast<double>(playback_stats_.dropped_frames));
-            cJSON_AddNumberToObject(root, "http_read_stalls",
-                                    static_cast<double>(playback_stats_.http_read_stalls));
-            cJSON_AddNumberToObject(root, "max_http_read_stall_ms",
-                                    static_cast<double>(playback_stats_.max_http_read_stall_us / 1000));
-            cJSON_AddNumberToObject(root, "audio_push_block_count",
-                                    static_cast<double>(playback_stats_.audio_push_block_count));
-            cJSON_AddNumberToObject(root, "max_audio_push_block_ms",
-                                    static_cast<double>(playback_stats_.max_audio_push_block_us / 1000));
-            cJSON_AddNumberToObject(root, "late_frame_count",
-                                    static_cast<double>(playback_stats_.late_frame_count));
-            cJSON_AddNumberToObject(root, "max_frame_late_ms",
-                                    static_cast<double>(playback_stats_.max_frame_late_us / 1000));
+            cJSON_AddStringToObject(root, "end_reason", telemetry.end_reason.c_str());
+            cJSON_AddNumberToObject(root, "playback_duration_ms", telemetry.duration_ms);
+            cJSON_AddNumberToObject(root, "queued_video_frames", telemetry.queued_video_frames);
+            cJSON_AddNumberToObject(root, "max_queued_video_frames", telemetry.max_queued_video_frames);
+            cJSON_AddNumberToObject(root, "rendered_frames", telemetry.rendered_frames);
+            cJSON_AddNumberToObject(root, "dropped_frames", telemetry.dropped_frames);
+            cJSON_AddNumberToObject(root, "queue_overflow_drop_count", telemetry.queue_overflow_drop_count);
+            cJSON_AddNumberToObject(root, "render_backlog_drop_count", telemetry.render_backlog_drop_count);
+            cJSON_AddNumberToObject(root, "http_read_stalls", telemetry.http_read_stalls);
+            cJSON_AddNumberToObject(root, "http_read_calls", telemetry.http_read_calls);
+            cJSON_AddNumberToObject(root, "http_read_bytes", static_cast<double>(telemetry.http_read_bytes));
+            cJSON_AddNumberToObject(root, "max_http_read_stall_ms", telemetry.max_http_read_stall_ms);
+            cJSON_AddNumberToObject(root, "max_http_read_ms", telemetry.max_http_read_ms);
+            cJSON_AddNumberToObject(root, "audio_push_block_count", telemetry.audio_push_block_count);
+            cJSON_AddNumberToObject(root, "max_audio_push_block_ms", telemetry.max_audio_push_block_ms);
+            cJSON_AddNumberToObject(root, "max_audio_push_ms", telemetry.max_audio_push_ms);
+            cJSON_AddNumberToObject(root, "video_frames_decode_attempted", telemetry.video_frames_decode_attempted);
+            cJSON_AddNumberToObject(root, "video_frames_decode_failed", telemetry.video_frames_decode_failed);
+            cJSON_AddNumberToObject(root, "video_frames_presented", telemetry.video_frames_presented);
+            cJSON_AddNumberToObject(root, "late_frame_count", telemetry.late_frame_count);
+            cJSON_AddNumberToObject(root, "max_frame_late_ms", telemetry.max_frame_late_ms);
+            cJSON_AddNumberToObject(root, "max_frame_age_before_decode_ms", telemetry.max_frame_age_before_decode_ms);
+            cJSON_AddNumberToObject(root, "max_frame_age_after_present_ms", telemetry.max_frame_age_after_present_ms);
+            cJSON_AddNumberToObject(root, "max_jpeg_decode_ms", telemetry.max_jpeg_decode_ms);
+            cJSON_AddNumberToObject(root, "max_frame_present_ms", telemetry.max_frame_present_ms);
+            cJSON_AddNumberToObject(root, "http_open_time_ms", telemetry.http_open_time_ms);
+            cJSON_AddNumberToObject(root, "first_audio_packet_ms", telemetry.first_audio_packet_ms);
+            cJSON_AddNumberToObject(root, "first_video_frame_ms", telemetry.first_video_frame_ms);
+            cJSON_AddNumberToObject(root, "playback_started_ms", telemetry.playback_started_ms);
+            cJSON_AddNumberToObject(root, "first_frame_presented_ms", telemetry.first_frame_presented_ms);
             if (state_ == State::kError) {
                 cJSON_AddStringToObject(root, "error", error_msg_.c_str());
             }
@@ -282,8 +390,12 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
         render_failed_.store(false);
         dropped_frames_ = 0;
         playback_start_us_ = 0;
-        playback_stats_ = {};
-        playback_stats_.start_us = esp_timer_get_time();
+        {
+            std::lock_guard<std::mutex> lock(playback_stats_mutex_);
+            playback_stats_ = {};
+            playback_stats_.start_us = esp_timer_get_time();
+            playback_end_reason_ = "in_progress";
+        }
         playback_stats_reported_ = false;
         last_progress_post_us_.store(0);
         state_ = State::kLoading;
@@ -303,6 +415,7 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
 
 void VideoPlayer::Stop() {
     if (state_ == State::kIdle) return;
+    SetPlaybackEndReason("stop_requested");
     paused_.store(false);          // unblock stream task so it sees stop_requested_
     stop_requested_.store(true);
     video_queue_cv_.notify_all();
@@ -327,10 +440,14 @@ void VideoPlayer::StopPlayback() {
         video_queue_.clear();
         playback_start_us_ = 0;
         dropped_frames_ = 0;
-        playback_stats_ = {};
-        playback_stats_reported_ = false;
-        last_progress_post_us_.store(0);
     }
+    {
+        std::lock_guard<std::mutex> lock(playback_stats_mutex_);
+        playback_stats_ = {};
+        playback_end_reason_.clear();
+        playback_stats_reported_ = false;
+    }
+    last_progress_post_us_.store(0);
     stop_requested_.store(false);
     paused_.store(false);
     reader_done_.store(false);
@@ -439,6 +556,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         ESP_LOGE(TAG, "JPEG buffer allocation failed");
         self->state_ = State::kError;
         self->error_msg_ = "out of memory";
+        self->SetPlaybackEndReason("jpeg_buffer_alloc_failed");
         Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
         self->stream_task_handle_ = nullptr;
         {
@@ -466,11 +584,25 @@ void VideoPlayer::StreamReaderTask(void* arg) {
     http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
     http->SetHeader("Device-Id",  SystemInfo::GetMacAddress().c_str());
 
-    if (!http->Open("GET", self->stream_url_)) {
+    int64_t http_open_start_us = esp_timer_get_time();
+    bool http_opened = http->Open("GET", self->stream_url_);
+    int64_t http_open_elapsed_us = esp_timer_get_time() - http_open_start_us;
+    {
+        std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+        self->playback_stats_.http_open_time_us = http_open_elapsed_us;
+        if (http_open_elapsed_us >= kHttpReadStallWarnUs) {
+            self->playback_stats_.http_read_stalls++;
+            self->playback_stats_.max_http_read_stall_us =
+                std::max(self->playback_stats_.max_http_read_stall_us, http_open_elapsed_us);
+        }
+    }
+
+    if (!http_opened) {
         ESP_LOGE(TAG, "StreamReaderTask: HTTP open failed");
         heap_caps_free(jpeg_buf);
         self->state_ = State::kError;
         self->error_msg_ = "network error";
+        self->SetPlaybackEndReason("stream_http_open_failed");
         Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
         self->stream_task_handle_ = nullptr;
         {
@@ -483,13 +615,19 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         vTaskDelete(nullptr);
         return;
     }
-    if (http->GetStatusCode() != 200) {
-        int code = http->GetStatusCode();
+    int status_code = http->GetStatusCode();
+    {
+        std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+        self->playback_stats_.http_status_code = status_code;
+    }
+    if (status_code != 200) {
+        int code = status_code;
         http->Close();
         ESP_LOGE(TAG, "StreamReaderTask: HTTP %d", code);
         heap_caps_free(jpeg_buf);
         self->state_ = State::kError;
         self->error_msg_ = "HTTP " + std::to_string(code);
+        self->SetPlaybackEndReason("stream_http_status_error");
         Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
         self->stream_task_handle_ = nullptr;
         {
@@ -504,14 +642,36 @@ void VideoPlayer::StreamReaderTask(void* arg) {
     }
 
     auto& audio = Application::GetInstance().GetAudioService();
-    auto read_with_stats = [self, &http](uint8_t* dst, int len) -> int {
+    auto read_with_stats = [self, &http](uint8_t* dst, int len, bool is_header) -> int {
         int64_t read_start_us = esp_timer_get_time();
         int n = http->Read(reinterpret_cast<char*>(dst), len);
         int64_t read_elapsed_us = esp_timer_get_time() - read_start_us;
-        if (read_elapsed_us >= kHttpReadStallWarnUs) {
-            self->playback_stats_.http_read_stalls++;
-            self->playback_stats_.max_http_read_stall_us =
-                std::max(self->playback_stats_.max_http_read_stall_us, read_elapsed_us);
+        {
+            std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+            self->playback_stats_.http_read_calls++;
+            if (is_header) {
+                self->playback_stats_.http_header_read_calls++;
+                self->playback_stats_.header_read_time_us_total += read_elapsed_us;
+            } else {
+                self->playback_stats_.http_payload_read_calls++;
+                self->playback_stats_.payload_read_time_us_total += read_elapsed_us;
+            }
+            self->playback_stats_.http_read_time_us_total += read_elapsed_us;
+            self->playback_stats_.max_http_read_us =
+                std::max(self->playback_stats_.max_http_read_us, read_elapsed_us);
+            if (n > 0) {
+                self->playback_stats_.http_read_bytes += n;
+            } else {
+                self->playback_stats_.http_zero_reads++;
+            }
+            if (n > 0 && n < len) {
+                self->playback_stats_.http_read_short_calls++;
+            }
+            if (read_elapsed_us >= kHttpReadStallWarnUs) {
+                self->playback_stats_.http_read_stalls++;
+                self->playback_stats_.max_http_read_stall_us =
+                    std::max(self->playback_stats_.max_http_read_stall_us, read_elapsed_us);
+            }
         }
         return n;
     };
@@ -532,7 +692,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         // Read 16-byte frame header.
         int got = 0;
         while (got < 16 && !self->stop_requested_.load()) {
-            int n = read_with_stats(hdr + got, 16 - got);
+            int n = read_with_stats(hdr + got, 16 - got, true);
             if (n <= 0) goto stream_done;
             got += n;
         }
@@ -550,17 +710,19 @@ void VideoPlayer::StreamReaderTask(void* arg) {
 
         if (magic != kFrameMagic) {
             ESP_LOGE(TAG, "Frame sync lost (magic=0x%08" PRIx32 ")", magic);
+            self->SetPlaybackEndReason("stream_bad_magic");
             break;
         }
         if (flen == 0 || flen > kJpegBufSize) {
             ESP_LOGE(TAG, "Bad frame length %" PRIu32, flen);
+            self->SetPlaybackEndReason("stream_bad_frame_length");
             break;
         }
 
         // Read payload.
         uint32_t read = 0;
         while (read < flen && !self->stop_requested_.load()) {
-            int n = read_with_stats(jpeg_buf + read, (int)(flen - read));
+            int n = read_with_stats(jpeg_buf + read, (int)(flen - read), false);
             if (n <= 0) goto stream_done;
             read += (uint32_t)n;
         }
@@ -569,17 +731,40 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         if (ftype == kFrameVideo) {
             auto frame = std::make_unique<QueuedVideoFrame>();
             frame->ts_ms = ts_ms;
+            int64_t copy_start_us = esp_timer_get_time();
             frame->jpeg.assign(jpeg_buf, jpeg_buf + flen);
+            int64_t copy_elapsed_us = esp_timer_get_time() - copy_start_us;
+            int queue_depth = 0;
+            bool queue_overflow = false;
+            int64_t now_us = esp_timer_get_time();
 
             {
                 std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
                 if (self->video_queue_.size() >= kMaxQueuedVideoFrames) {
                     self->video_queue_.pop_front();
                     self->dropped_frames_++;
-                    self->playback_stats_.dropped_frames = self->dropped_frames_;
+                    queue_overflow = true;
                 }
                 self->video_queue_.push_back(std::move(frame));
+                queue_depth = static_cast<int>(self->video_queue_.size());
                 self->video_queue_cv_.notify_all();
+            }
+            {
+                std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+                self->playback_stats_.video_frames_seen++;
+                self->playback_stats_.video_bytes_seen += flen;
+                self->playback_stats_.video_frame_copy_time_us_total += copy_elapsed_us;
+                self->playback_stats_.max_video_frame_copy_us =
+                    std::max(self->playback_stats_.max_video_frame_copy_us, copy_elapsed_us);
+                self->playback_stats_.max_queued_video_frames =
+                    std::max(self->playback_stats_.max_queued_video_frames, static_cast<size_t>(queue_depth));
+                if (queue_overflow) {
+                    self->playback_stats_.queue_overflow_drop_count++;
+                }
+                self->playback_stats_.dropped_frames = self->dropped_frames_;
+                if (self->playback_stats_.first_video_frame_us == 0 && self->playback_stats_.start_us > 0) {
+                    self->playback_stats_.first_video_frame_us = now_us - self->playback_stats_.start_us;
+                }
             }
             queued_frames++;
         } else if (ftype == kFrameAudio) {
@@ -587,28 +772,51 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             packet->sample_rate    = 24000;
             packet->frame_duration = 60;
             packet->timestamp      = ts_ms;
+            int64_t copy_start_us = esp_timer_get_time();
             packet->payload.assign(jpeg_buf, jpeg_buf + flen);
+            int64_t copy_elapsed_us = esp_timer_get_time() - copy_start_us;
             int64_t push_start_us = esp_timer_get_time();
             audio.PushPacketToDecodeQueue(std::move(packet), true);
             int64_t push_elapsed_us = esp_timer_get_time() - push_start_us;
-            if (push_elapsed_us >= kAudioPushBlockWarnUs) {
-                self->playback_stats_.audio_push_block_count++;
-                self->playback_stats_.max_audio_push_block_us =
-                    std::max(self->playback_stats_.max_audio_push_block_us, push_elapsed_us);
-            }
+            int64_t now_us = esp_timer_get_time();
+            bool playback_started_now = false;
 
             {
                 std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
                 if (!playback_anchor_set) {
-                    self->playback_start_us_ = esp_timer_get_time() - (static_cast<int64_t>(ts_ms) * 1000);
+                    self->playback_start_us_ = now_us - (static_cast<int64_t>(ts_ms) * 1000);
                     playback_anchor_set = true;
                 }
                 if (!self->playback_started_.load()) {
                     audio_packets_buffered++;
                     if (audio_packets_buffered >= kAudioPrebufferPackets) {
                         self->playback_started_.store(true);
+                        playback_started_now = true;
                         self->video_queue_cv_.notify_all();
                     }
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+                self->playback_stats_.audio_packets_seen++;
+                self->playback_stats_.audio_bytes_seen += flen;
+                self->playback_stats_.audio_packet_copy_time_us_total += copy_elapsed_us;
+                self->playback_stats_.max_audio_packet_copy_us =
+                    std::max(self->playback_stats_.max_audio_packet_copy_us, copy_elapsed_us);
+                self->playback_stats_.audio_push_time_us_total += push_elapsed_us;
+                self->playback_stats_.max_audio_push_us =
+                    std::max(self->playback_stats_.max_audio_push_us, push_elapsed_us);
+                if (push_elapsed_us >= kAudioPushBlockWarnUs) {
+                    self->playback_stats_.audio_push_block_count++;
+                    self->playback_stats_.max_audio_push_block_us =
+                        std::max(self->playback_stats_.max_audio_push_block_us, push_elapsed_us);
+                }
+                if (self->playback_stats_.first_audio_packet_us == 0 && self->playback_stats_.start_us > 0) {
+                    self->playback_stats_.first_audio_packet_us = now_us - self->playback_stats_.start_us;
+                }
+                if (playback_started_now && self->playback_stats_.playback_started_us == 0 &&
+                    self->playback_stats_.start_us > 0) {
+                    self->playback_stats_.playback_started_us = now_us - self->playback_stats_.start_us;
                 }
             }
         } else {
@@ -624,6 +832,13 @@ stream_done:
     http->Close();
     heap_caps_free(jpeg_buf);
 
+    if (!self->stop_requested_.load()) {
+        std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+        if (self->playback_end_reason_.empty() || self->playback_end_reason_ == "in_progress") {
+            self->playback_end_reason_ = "stream_read_ended";
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
         self->reader_done_.store(true);
@@ -635,7 +850,10 @@ stream_done:
     }
     ESP_LOGI(TAG, "StreamReaderTask: queued=%zu dropped=%zu stopped=%d",
              queued_frames, self->dropped_frames_, (int)self->stop_requested_.load());
-    self->playback_stats_.dropped_frames = self->dropped_frames_;
+    {
+        std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+        self->playback_stats_.dropped_frames = self->dropped_frames_;
+    }
     self->MaybeFinishPlayback();
     vTaskDelete(nullptr);
 }
@@ -657,6 +875,7 @@ void VideoPlayer::VideoRenderTask(void* arg) {
         if (self->frame_buf_b_) { heap_caps_free(self->frame_buf_b_); self->frame_buf_b_ = nullptr; }
         self->state_ = State::kError;
         self->error_msg_ = "out of memory";
+        self->SetPlaybackEndReason("render_buffer_alloc_failed");
         self->render_task_handle_ = nullptr;
         self->render_failed_.store(true);
         Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
@@ -687,13 +906,23 @@ void VideoPlayer::VideoRenderTask(void* arg) {
         }
 
         std::unique_ptr<QueuedVideoFrame> frame;
+        int backlog_drops = 0;
         {
             std::unique_lock<std::mutex> lock(self->video_queue_mutex_);
+            int64_t wait_start_us = esp_timer_get_time();
             self->video_queue_cv_.wait(lock, [self]() {
                 return self->stop_requested_.load() ||
                        (self->playback_started_.load() && !self->video_queue_.empty()) ||
                        self->reader_done_.load();
             });
+            int64_t wait_elapsed_us = esp_timer_get_time() - wait_start_us;
+            {
+                std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+                self->playback_stats_.render_wakeups++;
+                self->playback_stats_.render_queue_wait_us_total += wait_elapsed_us;
+                self->playback_stats_.max_render_queue_wait_us =
+                    std::max(self->playback_stats_.max_render_queue_wait_us, wait_elapsed_us);
+            }
 
             if (self->stop_requested_.load()) {
                 break;
@@ -705,6 +934,10 @@ void VideoPlayer::VideoRenderTask(void* arg) {
                 playback_base_us = self->playback_start_us_;
             }
             if (self->video_queue_.empty()) {
+                {
+                    std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+                    self->playback_stats_.render_empty_queue_wakeups++;
+                }
                 if (self->reader_done_.load()) {
                     break;
                 }
@@ -712,11 +945,16 @@ void VideoPlayer::VideoRenderTask(void* arg) {
             }
 
             if (self->video_queue_.size() > 1) {
-                self->dropped_frames_ += self->video_queue_.size() - 1;
-                self->playback_stats_.dropped_frames = self->dropped_frames_;
+                backlog_drops = static_cast<int>(self->video_queue_.size() - 1);
+                self->dropped_frames_ += backlog_drops;
             }
             frame = std::move(self->video_queue_.back());
             self->video_queue_.clear();
+        }
+        if (backlog_drops > 0) {
+            std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+            self->playback_stats_.render_backlog_drop_count += backlog_drops;
+            self->playback_stats_.dropped_frames = self->dropped_frames_;
         }
 
         if (!screen_created) {
@@ -731,39 +969,88 @@ void VideoPlayer::VideoRenderTask(void* arg) {
         int64_t now_us = esp_timer_get_time();
         if (target_us > now_us) {
             int64_t sleep_us = target_us - now_us;
+            {
+                std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+                self->playback_stats_.render_schedule_sleep_us_total += sleep_us;
+                self->playback_stats_.max_render_schedule_sleep_us =
+                    std::max(self->playback_stats_.max_render_schedule_sleep_us, sleep_us);
+            }
             vTaskDelay(pdMS_TO_TICKS((sleep_us + 999) / 1000));
         } else if (target_us + kLateFrameDropUs < now_us) {
             int64_t late_us = now_us - target_us;
+            std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
             self->playback_stats_.late_frame_count++;
+            self->playback_stats_.total_frame_late_us += late_us;
             self->playback_stats_.max_frame_late_us =
                 std::max(self->playback_stats_.max_frame_late_us, late_us);
             ESP_LOGD(TAG, "Rendering late frame immediately (late=%lld ms)",
                      (long long)(late_us / 1000));
         }
 
+        int64_t decode_start_us = esp_timer_get_time();
+        int64_t age_before_decode_us = std::max<int64_t>(0, decode_start_us - target_us);
+        {
+            std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+            self->playback_stats_.video_frames_decode_attempted++;
+            self->playback_stats_.total_frame_age_before_decode_us += age_before_decode_us;
+            self->playback_stats_.max_frame_age_before_decode_us =
+                std::max(self->playback_stats_.max_frame_age_before_decode_us, age_before_decode_us);
+        }
         uint8_t* decode_buf = self->buf_a_is_display_ ? self->frame_buf_b_ : self->frame_buf_a_;
         size_t dec_len = 0;
         size_t w = 0;
         size_t h = 0;
         size_t stride = 0;
+        int64_t decode_begin_us = esp_timer_get_time();
         esp_err_t ret = jpeg_to_image_into(frame->jpeg.data(), frame->jpeg.size(),
                                            decode_buf, kFrameBytes, &dec_len, &w, &h, &stride);
+        int64_t decode_elapsed_us = esp_timer_get_time() - decode_begin_us;
+        {
+            std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+            self->playback_stats_.jpeg_decode_time_us_total += decode_elapsed_us;
+            self->playback_stats_.max_jpeg_decode_us =
+                std::max(self->playback_stats_.max_jpeg_decode_us, decode_elapsed_us);
+        }
         if (ret != ESP_OK || dec_len > kFrameBytes || w != kFrameW || h != kFrameH ||
             stride != (kFrameW * 2)) {
             ESP_LOGE(TAG, "JPEG decode FAILED frame %zu: ret=%d flen=%zu dec_len=%zu",
                      rendered_frames, ret, frame->jpeg.size(), dec_len);
+            std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+            self->playback_stats_.video_frames_decode_failed++;
             continue;
         }
 
         auto* display = Board::GetInstance().GetDisplay();
-        DisplayLockGuard lock(display);
-        if (self->video_img_obj_) {
-            self->buf_a_is_display_ = !self->buf_a_is_display_;
-            frame_dsc.data = decode_buf;
-            lv_image_set_src(static_cast<lv_obj_t*>(self->video_img_obj_), &frame_dsc);
-            lv_obj_invalidate(static_cast<lv_obj_t*>(self->video_img_obj_));
-            rendered_frames++;
+        int64_t present_start_us = esp_timer_get_time();
+        bool frame_presented = false;
+        {
+            DisplayLockGuard lock(display);
+            if (self->video_img_obj_) {
+                self->buf_a_is_display_ = !self->buf_a_is_display_;
+                frame_dsc.data = decode_buf;
+                lv_image_set_src(static_cast<lv_obj_t*>(self->video_img_obj_), &frame_dsc);
+                lv_obj_invalidate(static_cast<lv_obj_t*>(self->video_img_obj_));
+                rendered_frames++;
+                frame_presented = true;
+            }
+        }
+        int64_t present_elapsed_us = esp_timer_get_time() - present_start_us;
+        int64_t presented_at_us = esp_timer_get_time();
+        int64_t age_after_present_us = std::max<int64_t>(0, presented_at_us - target_us);
+        if (frame_presented) {
+            std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+            self->playback_stats_.frame_present_time_us_total += present_elapsed_us;
+            self->playback_stats_.max_frame_present_us =
+                std::max(self->playback_stats_.max_frame_present_us, present_elapsed_us);
+            self->playback_stats_.video_frames_presented = rendered_frames;
             self->playback_stats_.rendered_frames = rendered_frames;
+            self->playback_stats_.total_frame_age_after_present_us += age_after_present_us;
+            self->playback_stats_.max_frame_age_after_present_us =
+                std::max(self->playback_stats_.max_frame_age_after_present_us, age_after_present_us);
+            if (self->playback_stats_.first_frame_presented_us == 0 && self->playback_stats_.start_us > 0) {
+                self->playback_stats_.first_frame_presented_us =
+                    presented_at_us - self->playback_stats_.start_us;
+            }
         }
 
         self->MaybePostPlaybackProgress();
