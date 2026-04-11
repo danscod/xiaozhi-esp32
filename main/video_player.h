@@ -190,6 +190,8 @@ private:
     static constexpr size_t   kJpegBufSize   = 32 * 1024;              // 32 KB max JPEG
     static constexpr size_t   kMaxQueuedVideoFrames = 10;
     static constexpr size_t   kAudioPrebufferPackets = 4;              // 240 ms
+    static constexpr int64_t  kFrameSelectionLeadUs = 50000;           // prefer the newest frame due within 50 ms
+    static constexpr int64_t  kFutureFrameRecheckUs = 40000;           // recheck pacing every 40 ms instead of long sleeps
     static constexpr int64_t  kLateFrameDropUs = 500000;               // allow a wider sync window
     static constexpr int64_t  kHttpReadStallWarnUs = 80000;            // >80 ms read gap
     static constexpr int64_t  kAudioPushBlockWarnUs = 20000;           // >20 ms queue wait

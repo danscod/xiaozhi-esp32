@@ -907,6 +907,8 @@ void VideoPlayer::VideoRenderTask(void* arg) {
 
         std::unique_ptr<QueuedVideoFrame> frame;
         int backlog_drops = 0;
+        int64_t future_wait_us = 0;
+        int64_t target_us = 0;
         {
             std::unique_lock<std::mutex> lock(self->video_queue_mutex_);
             int64_t wait_start_us = esp_timer_get_time();
@@ -944,17 +946,80 @@ void VideoPlayer::VideoRenderTask(void* arg) {
                 continue;
             }
 
-            if (self->video_queue_.size() > 1) {
-                backlog_drops = static_cast<int>(self->video_queue_.size() - 1);
-                self->dropped_frames_ += backlog_drops;
+            int64_t now_us_locked = esp_timer_get_time();
+            while (!self->video_queue_.empty()) {
+                int64_t front_target_us =
+                    playback_base_us + (static_cast<int64_t>(self->video_queue_.front()->ts_ms) * 1000);
+                if (front_target_us + kLateFrameDropUs < now_us_locked) {
+                    self->video_queue_.pop_front();
+                    backlog_drops++;
+                    self->dropped_frames_++;
+                    continue;
+                }
+                break;
             }
-            frame = std::move(self->video_queue_.back());
-            self->video_queue_.clear();
+            if (self->video_queue_.empty()) {
+                {
+                    std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+                    self->playback_stats_.render_empty_queue_wakeups++;
+                    self->playback_stats_.render_backlog_drop_count += backlog_drops;
+                    self->playback_stats_.dropped_frames = self->dropped_frames_;
+                }
+                if (self->reader_done_.load()) {
+                    break;
+                }
+                continue;
+            }
+
+            int selected_index = -1;
+            for (size_t i = 0; i < self->video_queue_.size(); ++i) {
+                int64_t queued_target_us =
+                    playback_base_us + (static_cast<int64_t>(self->video_queue_[i]->ts_ms) * 1000);
+                if (queued_target_us <= now_us_locked + kFrameSelectionLeadUs) {
+                    selected_index = static_cast<int>(i);
+                } else {
+                    break;
+                }
+            }
+
+            if (selected_index < 0) {
+                int64_t front_target_us =
+                    playback_base_us + (static_cast<int64_t>(self->video_queue_.front()->ts_ms) * 1000);
+                future_wait_us = std::max<int64_t>(1000, std::min<int64_t>(
+                    front_target_us - now_us_locked, kFutureFrameRecheckUs));
+                if (backlog_drops > 0) {
+                    std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+                    self->playback_stats_.render_backlog_drop_count += backlog_drops;
+                    self->playback_stats_.dropped_frames = self->dropped_frames_;
+                }
+                if (future_wait_us > 0) {
+                    std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+                    self->playback_stats_.render_schedule_sleep_us_total += future_wait_us;
+                    self->playback_stats_.max_render_schedule_sleep_us =
+                        std::max(self->playback_stats_.max_render_schedule_sleep_us, future_wait_us);
+                }
+                // Leave the queue intact; the front frame is still too far in the future.
+                continue;
+            }
+
+            backlog_drops += selected_index;
+            while (selected_index-- > 0) {
+                self->video_queue_.pop_front();
+                self->dropped_frames_++;
+            }
+            target_us = playback_base_us +
+                (static_cast<int64_t>(self->video_queue_.front()->ts_ms) * 1000);
+            frame = std::move(self->video_queue_.front());
+            self->video_queue_.pop_front();
         }
         if (backlog_drops > 0) {
             std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
             self->playback_stats_.render_backlog_drop_count += backlog_drops;
             self->playback_stats_.dropped_frames = self->dropped_frames_;
+        }
+        if (future_wait_us > 0) {
+            vTaskDelay(pdMS_TO_TICKS((future_wait_us + 999) / 1000));
+            continue;
         }
 
         if (!screen_created) {
@@ -965,7 +1030,6 @@ void VideoPlayer::VideoRenderTask(void* arg) {
             screen_created = true;
         }
 
-        int64_t target_us = playback_base_us + (static_cast<int64_t>(frame->ts_ms) * 1000);
         int64_t now_us = esp_timer_get_time();
         if (target_us > now_us) {
             int64_t sleep_us = target_us - now_us;
