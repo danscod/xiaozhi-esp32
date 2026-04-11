@@ -120,6 +120,6 @@ private:
     static constexpr size_t   kFrameBytes    = kFrameW * kFrameH * 2;  // RGB565
     static constexpr size_t   kJpegBufSize   = 32 * 1024;              // 32 KB max JPEG
     static constexpr size_t   kMaxQueuedVideoFrames = 6;
-    static constexpr size_t   kAudioPrebufferPackets = 6;              // 360 ms
-    static constexpr int64_t  kLateFrameDropUs = 150000;               // drop if >150 ms late
+    static constexpr size_t   kAudioPrebufferPackets = 2;              // 120 ms
+    static constexpr int64_t  kLateFrameDropUs = 500000;               // allow a wider sync window
 };

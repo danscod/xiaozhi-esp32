@@ -188,9 +188,6 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
     current_id_    = item_id;
 
     Application::GetInstance().Schedule([this, saved_url, saved_title, item_id]() {
-        // Abort any ongoing TTS.
-        Application::GetInstance().AbortSpeaking(kAbortReasonNone);
-
         // Stop any conflicting players.
         MediaPlayer::GetInstance().Stop();
         FlappyBird::GetInstance().Stop();
@@ -207,6 +204,7 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
         playback_start_us_ = 0;
         state_ = State::kLoading;
         UpdateDisplay();
+        Application::GetInstance().EndVoiceSessionForMedia();
 
         xTaskCreate(StreamReaderTask, "video_stream", 20480, this, 2,
                     &stream_task_handle_);
@@ -600,8 +598,12 @@ void VideoPlayer::VideoRenderTask(void* arg) {
                 }
                 continue;
             }
-            frame = std::move(self->video_queue_.front());
-            self->video_queue_.pop_front();
+
+            if (self->video_queue_.size() > 1) {
+                self->dropped_frames_ += self->video_queue_.size() - 1;
+            }
+            frame = std::move(self->video_queue_.back());
+            self->video_queue_.clear();
         }
 
         if (!screen_created) {
@@ -614,13 +616,12 @@ void VideoPlayer::VideoRenderTask(void* arg) {
 
         int64_t target_us = playback_base_us + (static_cast<int64_t>(frame->ts_ms) * 1000);
         int64_t now_us = esp_timer_get_time();
-        if (target_us + kLateFrameDropUs < now_us) {
-            self->dropped_frames_++;
-            continue;
-        }
         if (target_us > now_us) {
             int64_t sleep_us = target_us - now_us;
             vTaskDelay(pdMS_TO_TICKS((sleep_us + 999) / 1000));
+        } else if (target_us + kLateFrameDropUs < now_us) {
+            ESP_LOGD(TAG, "Rendering late frame immediately (late=%lld ms)",
+                     (long long)((now_us - target_us) / 1000));
         }
 
         uint8_t* decode_buf = self->buf_a_is_display_ ? self->frame_buf_b_ : self->frame_buf_a_;

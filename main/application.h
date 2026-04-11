@@ -112,6 +112,7 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
+    void EndVoiceSessionForMedia();
     
     /**
      * Reset protocol resources (thread-safe)
@@ -166,6 +167,7 @@ private:
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);
     ListeningMode GetDefaultListeningMode() const;
+    bool IsMediaPlaybackActive() const;
     
     // State change handler called by state machine
     void OnStateChanged(DeviceState old_state, DeviceState new_state);

@@ -515,6 +515,10 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnAudioChannelClosed([this, &board]() {
+        if (IsMediaPlaybackActive()) {
+            ESP_LOGI(TAG, "Ignoring audio channel close while media is active");
+            return;
+        }
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
@@ -526,6 +530,18 @@ void Application::InitializeProtocol() {
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
+        if (!cJSON_IsString(type)) {
+            ESP_LOGW(TAG, "Incoming JSON missing string type");
+            return;
+        }
+        if (IsMediaPlaybackActive() &&
+            (strcmp(type->valuestring, "tts") == 0 ||
+             strcmp(type->valuestring, "stt") == 0 ||
+             strcmp(type->valuestring, "llm") == 0 ||
+             strcmp(type->valuestring, "mcp") == 0)) {
+            ESP_LOGI(TAG, "Ignoring %s event while media is active", type->valuestring);
+            return;
+        }
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
@@ -661,6 +677,24 @@ void Application::DismissAlert() {
         display->SetStatus(Lang::Strings::STANDBY);
         display->SetEmotion("neutral");
         display->SetChatMessage("system", "");
+    }
+}
+
+bool Application::IsMediaPlaybackActive() const {
+    return VideoPlayer::GetInstance().GetState() != VideoPlayer::State::kIdle ||
+           MediaPlayer::GetInstance().GetState() != MediaPlayer::State::kIdle;
+}
+
+void Application::EndVoiceSessionForMedia() {
+    ESP_LOGI(TAG, "Ending voice session for media playback");
+    play_popup_on_listening_ = false;
+    AbortSpeaking(kAbortReasonNone);
+    audio_service_.EnableVoiceProcessing(false);
+    audio_service_.EnableWakeWordDetection(false);
+    audio_service_.ResetDecoder();
+    SetDeviceState(kDeviceStateIdle);
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        protocol_->CloseAudioChannel();
     }
 }
 
@@ -877,6 +911,11 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
+            audio_service_.EnableVoiceProcessing(false);
+            if (IsMediaPlaybackActive()) {
+                audio_service_.EnableWakeWordDetection(false);
+                break;
+            }
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
@@ -884,7 +923,6 @@ void Application::HandleStateChangedEvent() {
                 "\xe2\x97\x8f press   start listening\n"
                 "\xe2\x97\x8f hold    WiFi setup\n"
                 "\xe2\x97\x8f slide O-btn  power off");
-            audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
