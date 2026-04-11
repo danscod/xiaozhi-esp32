@@ -180,6 +180,8 @@ void Telemetry::PostVideoPlaybackStats(const VideoPlaybackTelemetry& telemetry) 
             cJSON_AddNumberToObject(root, "render_backlog_drop_count", telemetry.render_backlog_drop_count);
             cJSON_AddNumberToObject(root, "max_queued_video_frames", telemetry.max_queued_video_frames);
             cJSON_AddNumberToObject(root, "http_status_code", telemetry.http_status_code);
+            cJSON_AddNumberToObject(root, "stream_resume_count", telemetry.stream_resume_count);
+            cJSON_AddNumberToObject(root, "stream_resume_failure_count", telemetry.stream_resume_failure_count);
             cJSON_AddNumberToObject(root, "http_read_calls", telemetry.http_read_calls);
             cJSON_AddNumberToObject(root, "http_read_short_calls", telemetry.http_read_short_calls);
             cJSON_AddNumberToObject(root, "http_zero_reads", telemetry.http_zero_reads);
@@ -214,6 +216,7 @@ void Telemetry::PostVideoPlaybackStats(const VideoPlaybackTelemetry& telemetry) 
             cJSON_AddNumberToObject(root, "playback_started_ms", telemetry.playback_started_ms);
             cJSON_AddNumberToObject(root, "first_frame_presented_ms", telemetry.first_frame_presented_ms);
             cJSON_AddNumberToObject(root, "http_read_bytes", static_cast<double>(telemetry.http_read_bytes));
+            cJSON_AddNumberToObject(root, "expected_stream_bytes", static_cast<double>(telemetry.expected_stream_bytes));
             cJSON_AddNumberToObject(root, "audio_bytes_seen", static_cast<double>(telemetry.audio_bytes_seen));
             cJSON_AddNumberToObject(root, "video_bytes_seen", static_cast<double>(telemetry.video_bytes_seen));
             cJSON_AddNumberToObject(root, "http_read_time_us_total", static_cast<double>(telemetry.http_read_time_us_total));
@@ -246,6 +249,8 @@ void Telemetry::PostVideoPlaybackProgress(const VideoPlaybackTelemetry& telemetr
             cJSON_AddNumberToObject(root, "render_backlog_drop_count", telemetry.render_backlog_drop_count);
             cJSON_AddNumberToObject(root, "max_queued_video_frames", telemetry.max_queued_video_frames);
             cJSON_AddNumberToObject(root, "http_status_code", telemetry.http_status_code);
+            cJSON_AddNumberToObject(root, "stream_resume_count", telemetry.stream_resume_count);
+            cJSON_AddNumberToObject(root, "stream_resume_failure_count", telemetry.stream_resume_failure_count);
             cJSON_AddNumberToObject(root, "http_read_calls", telemetry.http_read_calls);
             cJSON_AddNumberToObject(root, "http_read_short_calls", telemetry.http_read_short_calls);
             cJSON_AddNumberToObject(root, "http_zero_reads", telemetry.http_zero_reads);
@@ -280,6 +285,7 @@ void Telemetry::PostVideoPlaybackProgress(const VideoPlaybackTelemetry& telemetr
             cJSON_AddNumberToObject(root, "playback_started_ms", telemetry.playback_started_ms);
             cJSON_AddNumberToObject(root, "first_frame_presented_ms", telemetry.first_frame_presented_ms);
             cJSON_AddNumberToObject(root, "http_read_bytes", static_cast<double>(telemetry.http_read_bytes));
+            cJSON_AddNumberToObject(root, "expected_stream_bytes", static_cast<double>(telemetry.expected_stream_bytes));
             cJSON_AddNumberToObject(root, "audio_bytes_seen", static_cast<double>(telemetry.audio_bytes_seen));
             cJSON_AddNumberToObject(root, "video_bytes_seen", static_cast<double>(telemetry.video_bytes_seen));
             cJSON_AddNumberToObject(root, "http_read_time_us_total", static_cast<double>(telemetry.http_read_time_us_total));

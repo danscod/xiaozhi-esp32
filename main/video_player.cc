@@ -16,6 +16,8 @@
 #include <esp_heap_caps.h>
 #include <cJSON.h>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #define TAG "VideoPlayer"
@@ -47,6 +49,8 @@ VideoPlaybackTelemetry VideoPlayer::BuildTelemetrySnapshot(int duration_ms,
     telemetry.render_backlog_drop_count = static_cast<int>(playback_stats_.render_backlog_drop_count);
     telemetry.max_queued_video_frames = static_cast<int>(playback_stats_.max_queued_video_frames);
     telemetry.http_status_code = playback_stats_.http_status_code;
+    telemetry.stream_resume_count = static_cast<int>(playback_stats_.stream_resume_count);
+    telemetry.stream_resume_failure_count = static_cast<int>(playback_stats_.stream_resume_failure_count);
     telemetry.http_read_calls = static_cast<int>(playback_stats_.http_read_calls);
     telemetry.http_read_short_calls = static_cast<int>(playback_stats_.http_read_short_calls);
     telemetry.http_zero_reads = static_cast<int>(playback_stats_.http_zero_reads);
@@ -94,6 +98,7 @@ VideoPlaybackTelemetry VideoPlayer::BuildTelemetrySnapshot(int duration_ms,
         ? static_cast<int>(playback_stats_.first_frame_presented_us / 1000)
         : -1;
     telemetry.http_read_bytes = playback_stats_.http_read_bytes;
+    telemetry.expected_stream_bytes = playback_stats_.expected_stream_bytes;
     telemetry.audio_bytes_seen = playback_stats_.audio_bytes_seen;
     telemetry.video_bytes_seen = playback_stats_.video_bytes_seen;
     telemetry.http_read_time_us_total = playback_stats_.http_read_time_us_total;
@@ -579,55 +584,88 @@ void VideoPlayer::StreamReaderTask(void* arg) {
 
     auto& board   = Board::GetInstance();
     auto  network = board.GetNetwork();
-    auto  http    = network->CreateHttp(0);
+    std::unique_ptr<Http> http;
+    int64_t stream_offset = 0;
+    int64_t expected_stream_bytes = 0;
 
-    http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
-    http->SetHeader("Device-Id",  SystemInfo::GetMacAddress().c_str());
-
-    int64_t http_open_start_us = esp_timer_get_time();
-    bool http_opened = http->Open("GET", self->stream_url_);
-    int64_t http_open_elapsed_us = esp_timer_get_time() - http_open_start_us;
-    {
-        std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
-        self->playback_stats_.http_open_time_us = http_open_elapsed_us;
-        if (http_open_elapsed_us >= kHttpReadStallWarnUs) {
-            self->playback_stats_.http_read_stalls++;
-            self->playback_stats_.max_http_read_stall_us =
-                std::max(self->playback_stats_.max_http_read_stall_us, http_open_elapsed_us);
+    auto parse_content_range_total = [](const std::string& value) -> int64_t {
+        size_t slash = value.find('/');
+        if (slash == std::string::npos || slash + 1 >= value.size()) {
+            return 0;
         }
-    }
+        return static_cast<int64_t>(std::strtoll(value.c_str() + slash + 1, nullptr, 10));
+    };
 
-    if (!http_opened) {
-        ESP_LOGE(TAG, "StreamReaderTask: HTTP open failed");
+    auto open_stream = [&](int64_t offset, bool is_resume) -> bool {
+        http = network->CreateHttp(0);
+        http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
+        http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+        if (offset > 0) {
+            char range_header[64];
+            std::snprintf(range_header, sizeof(range_header), "bytes=%lld-",
+                          static_cast<long long>(offset));
+            http->SetHeader("Range", range_header);
+        }
+
+        int64_t http_open_start_us = esp_timer_get_time();
+        bool http_opened = http->Open("GET", self->stream_url_);
+        int64_t http_open_elapsed_us = esp_timer_get_time() - http_open_start_us;
+        {
+            std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+            if (!is_resume && self->playback_stats_.http_open_time_us == 0) {
+                self->playback_stats_.http_open_time_us = http_open_elapsed_us;
+            }
+            if (http_open_elapsed_us >= kHttpReadStallWarnUs) {
+                self->playback_stats_.http_read_stalls++;
+                self->playback_stats_.max_http_read_stall_us =
+                    std::max(self->playback_stats_.max_http_read_stall_us, http_open_elapsed_us);
+            }
+        }
+
+        if (!http_opened) {
+            ESP_LOGE(TAG, "StreamReaderTask: HTTP open failed at offset=%lld",
+                     static_cast<long long>(offset));
+            return false;
+        }
+
+        int status_code = http->GetStatusCode();
+        {
+            std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+            self->playback_stats_.http_status_code = status_code;
+        }
+
+        const int expected_status = offset > 0 ? 206 : 200;
+        if (status_code != expected_status) {
+            ESP_LOGE(TAG, "StreamReaderTask: HTTP %d at offset=%lld (expected %d)",
+                     status_code, static_cast<long long>(offset), expected_status);
+            http->Close();
+            return false;
+        }
+
+        int64_t body_length = static_cast<int64_t>(http->GetBodyLength());
+        if (offset == 0 && body_length > 0) {
+            expected_stream_bytes = body_length;
+        } else if (offset > 0) {
+            int64_t range_total = parse_content_range_total(http->GetResponseHeader("Content-Range"));
+            if (range_total > 0) {
+                expected_stream_bytes = range_total;
+            } else if (expected_stream_bytes > 0 && body_length > 0) {
+                expected_stream_bytes = std::max(expected_stream_bytes, offset + body_length);
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+            self->playback_stats_.expected_stream_bytes = expected_stream_bytes;
+        }
+
+        return true;
+    };
+
+    if (!open_stream(0, false)) {
         heap_caps_free(jpeg_buf);
         self->state_ = State::kError;
         self->error_msg_ = "network error";
         self->SetPlaybackEndReason("stream_http_open_failed");
-        Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
-        self->stream_task_handle_ = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
-            self->reader_done_.store(true);
-            self->video_queue_cv_.notify_all();
-        }
-        Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
-        self->MaybeFinishPlayback();
-        vTaskDelete(nullptr);
-        return;
-    }
-    int status_code = http->GetStatusCode();
-    {
-        std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
-        self->playback_stats_.http_status_code = status_code;
-    }
-    if (status_code != 200) {
-        int code = status_code;
-        http->Close();
-        ESP_LOGE(TAG, "StreamReaderTask: HTTP %d", code);
-        heap_caps_free(jpeg_buf);
-        self->state_ = State::kError;
-        self->error_msg_ = "HTTP " + std::to_string(code);
-        self->SetPlaybackEndReason("stream_http_status_error");
         Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
         self->stream_task_handle_ = nullptr;
         {
@@ -676,6 +714,38 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         return n;
     };
 
+    int resume_attempts = 0;
+    auto try_resume = [&]() -> bool {
+        if (self->stop_requested_.load()) {
+            return false;
+        }
+        if (resume_attempts >= kMaxStreamResumeAttempts) {
+            std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+            self->playback_stats_.stream_resume_failure_count++;
+            return false;
+        }
+
+        resume_attempts++;
+        {
+            std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+            self->playback_stats_.stream_resume_count++;
+        }
+        ESP_LOGW(TAG, "StreamReaderTask: resuming at offset=%lld attempt=%d",
+                 static_cast<long long>(stream_offset), resume_attempts);
+
+        if (http) {
+            http->Close();
+        }
+        vTaskDelay(pdMS_TO_TICKS(kStreamResumeBackoffMs));
+
+        if (!open_stream(stream_offset, true)) {
+            std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+            self->playback_stats_.stream_resume_failure_count++;
+            return false;
+        }
+        return true;
+    };
+
     // Binary frame header: 4× uint32_t big-endian.
     uint8_t hdr[16];
     size_t  queued_frames = 0;
@@ -693,8 +763,14 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         int got = 0;
         while (got < 16 && !self->stop_requested_.load()) {
             int n = read_with_stats(hdr + got, 16 - got, true);
-            if (n <= 0) goto stream_done;
+            if (n < 0 || (n == 0 && expected_stream_bytes > 0 && stream_offset < expected_stream_bytes)) {
+                if (try_resume()) continue;
+                self->SetPlaybackEndReason("stream_resume_failed");
+                goto stream_done;
+            }
+            if (n == 0) goto stream_done;
             got += n;
+            stream_offset += n;
         }
         if (self->stop_requested_.load()) break;
 
@@ -723,8 +799,14 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         uint32_t read = 0;
         while (read < flen && !self->stop_requested_.load()) {
             int n = read_with_stats(jpeg_buf + read, (int)(flen - read), false);
-            if (n <= 0) goto stream_done;
+            if (n < 0 || (n == 0 && expected_stream_bytes > 0 && stream_offset < expected_stream_bytes)) {
+                if (try_resume()) continue;
+                self->SetPlaybackEndReason("stream_resume_failed");
+                goto stream_done;
+            }
+            if (n == 0) goto stream_done;
             read += (uint32_t)n;
+            stream_offset += n;
         }
         if (self->stop_requested_.load()) break;
 
@@ -829,7 +911,9 @@ void VideoPlayer::StreamReaderTask(void* arg) {
     }
 
 stream_done:
-    http->Close();
+    if (http) {
+        http->Close();
+    }
     heap_caps_free(jpeg_buf);
 
     if (!self->stop_requested_.load()) {

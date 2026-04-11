@@ -88,6 +88,9 @@ private:
         size_t render_backlog_drop_count = 0;
         size_t max_queued_video_frames = 0;
         int http_status_code = 0;
+        size_t stream_resume_count = 0;
+        size_t stream_resume_failure_count = 0;
+        int64_t expected_stream_bytes = 0;
         size_t http_read_calls = 0;
         size_t http_read_short_calls = 0;
         size_t http_zero_reads = 0;
@@ -190,6 +193,8 @@ private:
     static constexpr size_t   kJpegBufSize   = 32 * 1024;              // 32 KB max JPEG
     static constexpr size_t   kMaxQueuedVideoFrames = 10;
     static constexpr size_t   kAudioPrebufferPackets = 4;              // 240 ms
+    static constexpr int      kMaxStreamResumeAttempts = 6;
+    static constexpr int      kStreamResumeBackoffMs = 250;
     static constexpr int64_t  kFrameSelectionLeadUs = 50000;           // prefer the newest frame due within 50 ms
     static constexpr int64_t  kFutureFrameRecheckUs = 40000;           // recheck pacing every 40 ms instead of long sleeps
     static constexpr int64_t  kLateFrameDropUs = 500000;               // allow a wider sync window

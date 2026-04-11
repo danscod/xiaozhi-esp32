@@ -20,6 +20,8 @@ struct VideoPlaybackTelemetry {
     int render_backlog_drop_count = 0;
     int max_queued_video_frames = 0;
     int http_status_code = 0;
+    int stream_resume_count = 0;
+    int stream_resume_failure_count = 0;
     int http_read_calls = 0;
     int http_read_short_calls = 0;
     int http_zero_reads = 0;
@@ -54,6 +56,7 @@ struct VideoPlaybackTelemetry {
     int audio_push_block_count = 0;
     int late_frame_count = 0;
     int64_t http_read_bytes = 0;
+    int64_t expected_stream_bytes = 0;
     int64_t audio_bytes_seen = 0;
     int64_t video_bytes_seen = 0;
     int64_t http_read_time_us_total = 0;
