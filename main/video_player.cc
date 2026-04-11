@@ -536,9 +536,9 @@ void VideoPlayer::VideoRenderTask(void* arg) {
     auto* self = static_cast<VideoPlayer*>(arg);
 
     self->frame_buf_a_ = static_cast<uint8_t*>(
-        heap_caps_malloc(kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        heap_caps_aligned_alloc(16, kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     self->frame_buf_b_ = static_cast<uint8_t*>(
-        heap_caps_malloc(kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        heap_caps_aligned_alloc(16, kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!self->frame_buf_a_ || !self->frame_buf_b_) {
         ESP_LOGE(TAG, "Render buffers allocation failed");
         if (self->frame_buf_a_) { heap_caps_free(self->frame_buf_a_); self->frame_buf_a_ = nullptr; }
@@ -625,24 +625,18 @@ void VideoPlayer::VideoRenderTask(void* arg) {
         }
 
         uint8_t* decode_buf = self->buf_a_is_display_ ? self->frame_buf_b_ : self->frame_buf_a_;
-        uint8_t* decoded = nullptr;
         size_t dec_len = 0;
         size_t w = 0;
         size_t h = 0;
         size_t stride = 0;
-        esp_err_t ret = jpeg_to_image(frame->jpeg.data(), frame->jpeg.size(),
-                                      &decoded, &dec_len, &w, &h, &stride);
-        if (ret != ESP_OK || decoded == nullptr || dec_len > kFrameBytes) {
-            if (decoded) {
-                heap_caps_free(decoded);
-            }
+        esp_err_t ret = jpeg_to_image_into(frame->jpeg.data(), frame->jpeg.size(),
+                                           decode_buf, kFrameBytes, &dec_len, &w, &h, &stride);
+        if (ret != ESP_OK || dec_len > kFrameBytes || w != kFrameW || h != kFrameH ||
+            stride != (kFrameW * 2)) {
             ESP_LOGE(TAG, "JPEG decode FAILED frame %zu: ret=%d flen=%zu dec_len=%zu",
                      rendered_frames, ret, frame->jpeg.size(), dec_len);
             continue;
         }
-
-        memcpy(decode_buf, decoded, dec_len);
-        heap_caps_free(decoded);
 
         auto* display = Board::GetInstance().GetDisplay();
         DisplayLockGuard lock(display);

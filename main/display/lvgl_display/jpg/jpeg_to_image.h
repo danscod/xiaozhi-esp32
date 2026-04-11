@@ -55,6 +55,24 @@ extern "C" {
 esp_err_t jpeg_to_image(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len, size_t* width,
                         size_t* height, size_t* stride);
 
+/**
+ * @brief Decodes a JPEG image directly into a caller-provided RGB565 buffer
+ *
+ * This avoids the per-frame allocation/free cycle in callers that already own a
+ * reusable framebuffer.
+ *
+ * @param[in] src Pointer to the JPEG bitstream in memory
+ * @param[in] src_len Length of the JPEG bitstream in bytes
+ * @param[in] out Preallocated destination buffer for decoded RGB565 pixels
+ * @param[in] out_cap Size of the destination buffer in bytes
+ * @param[out] out_len Pointer to a variable that will receive the decoded byte count
+ * @param[out] width Pointer to a variable that will receive the image width in pixels
+ * @param[out] height Pointer to a variable that will receive the image height in pixels
+ * @param[out] stride Pointer to a variable that will receive the image stride in bytes
+ */
+esp_err_t jpeg_to_image_into(const uint8_t* src, size_t src_len, uint8_t* out, size_t out_cap, size_t* out_len,
+                             size_t* width, size_t* height, size_t* stride);
+
 #ifdef __cplusplus
 }
 #endif

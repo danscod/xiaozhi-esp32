@@ -1,6 +1,7 @@
 #include <esp_check.h>
 #include <esp_err.h>
 #include <esp_heap_caps.h>
+#include <stdbool.h>
 #include <sys/param.h>
 
 #include "esp_jpeg_common.h"
@@ -21,7 +22,8 @@
 #define TAG "jpeg_to_image"
 
 static esp_err_t decode_with_new_jpeg(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len, size_t* width,
-                                      size_t* height, size_t* stride) {
+                                      size_t* height, size_t* stride, uint8_t* preallocated_out,
+                                      size_t preallocated_out_len) {
     ESP_LOGD(TAG, "Decoding JPEG with software decoder");
     esp_err_t ret = ESP_OK;
     jpeg_error_t jpeg_ret = JPEG_ERR_OK;
@@ -53,11 +55,22 @@ static esp_err_t decode_with_new_jpeg(const uint8_t* src, size_t src_len, uint8_
 
     ESP_LOGD(TAG, "JPEG header info: width=%d, height=%d", out_info.width, out_info.height);
 
-    out_buf = jpeg_calloc_align(out_info.width * out_info.height * 2, 16);
-    if (out_buf == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate memory for JPEG output buffer");
-        ret = ESP_ERR_NO_MEM;
-        goto jpeg_dec_failed;
+    size_t required_len = out_info.width * out_info.height * 2;
+    if (preallocated_out != NULL) {
+        if (preallocated_out_len < required_len) {
+            ESP_LOGE(TAG, "Preallocated JPEG output buffer too small: need=%zu got=%zu",
+                     required_len, preallocated_out_len);
+            ret = ESP_ERR_INVALID_SIZE;
+            goto jpeg_dec_failed;
+        }
+        out_buf = preallocated_out;
+    } else {
+        out_buf = jpeg_calloc_align(required_len, 16);
+        if (out_buf == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate memory for JPEG output buffer");
+            ret = ESP_ERR_NO_MEM;
+            goto jpeg_dec_failed;
+        }
     }
 
     jpeg_io.outbuf = out_buf;
@@ -71,8 +84,10 @@ static esp_err_t decode_with_new_jpeg(const uint8_t* src, size_t src_len, uint8_
     ESP_LOG_BUFFER_HEXDUMP(TAG, out_buf, MIN(out_info.width * out_info.height * 2, 256), ESP_LOG_DEBUG);
 
     *out = out_buf;
-    out_buf = NULL;
-    *out_len = (size_t)(out_info.width * out_info.height * 2);
+    if (preallocated_out == NULL) {
+        out_buf = NULL;
+    }
+    *out_len = required_len;
     *width = (size_t)out_info.width;
     *height = (size_t)out_info.height;
     *stride = (size_t)out_info.width * 2;
@@ -86,7 +101,7 @@ jpeg_dec_failed:
         jpeg_dec_close(jpeg_dec);
         jpeg_dec = NULL;
     }
-    if (out_buf) {
+    if (out_buf && preallocated_out == NULL) {
         jpeg_free_align(out_buf);
         out_buf = NULL;
     }
@@ -101,7 +116,8 @@ jpeg_dec_failed:
 
 #ifdef CONFIG_XIAOZHI_ENABLE_HARDWARE_JPEG_DECODER
 static esp_err_t decode_with_hardware_jpeg(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len,
-                                           size_t* width, size_t* height, size_t* stride) {
+                                           size_t* width, size_t* height, size_t* stride, uint8_t* preallocated_out,
+                                           size_t preallocated_out_len) {
     ESP_LOGD(TAG, "Decoding JPEG with hardware decoder");
     esp_err_t ret = ESP_OK;
 
@@ -169,11 +185,21 @@ static esp_err_t decode_with_hardware_jpeg(const uint8_t* src, size_t src_len, u
             goto jpeg_hw_dec_failed;
     }
 
-    out_buf = (uint8_t*)jpeg_alloc_decoder_mem(out_buf_len, &rx_mem_cfg, &rx_buffer_size);
-    if (out_buf == NULL || rx_buffer_size < out_buf_len) {
-        ESP_LOGE(TAG, "Failed to allocate memory for JPEG output buffer");
-        ret = ESP_ERR_NO_MEM;
-        goto jpeg_hw_dec_failed;
+    if (preallocated_out != NULL) {
+        if (preallocated_out_len < out_buf_len) {
+            ESP_LOGE(TAG, "Preallocated hardware JPEG output buffer too small: need=%zu got=%zu",
+                     out_buf_len, preallocated_out_len);
+            ret = ESP_ERR_INVALID_SIZE;
+            goto jpeg_hw_dec_failed;
+        }
+        out_buf = preallocated_out;
+    } else {
+        out_buf = (uint8_t*)jpeg_alloc_decoder_mem(out_buf_len, &rx_mem_cfg, &rx_buffer_size);
+        if (out_buf == NULL || rx_buffer_size < out_buf_len) {
+            ESP_LOGE(TAG, "Failed to allocate memory for JPEG output buffer");
+            ret = ESP_ERR_NO_MEM;
+            goto jpeg_hw_dec_failed;
+        }
     }
 
     uint32_t out_size = 0;
@@ -209,7 +235,9 @@ static esp_err_t decode_with_hardware_jpeg(const uint8_t* src, size_t src_len, u
     ESP_LOG_BUFFER_HEXDUMP(TAG, out_buf, MIN(out_size, 256), ESP_LOG_DEBUG);
 
     *out = out_buf;
-    out_buf = NULL;
+    if (preallocated_out == NULL) {
+        out_buf = NULL;
+    }
     *out_len = (size_t)out_size;
     jpeg_del_decoder_engine(jpeg_dec);
     jpeg_dec = NULL;
@@ -221,7 +249,7 @@ static esp_err_t decode_with_hardware_jpeg(const uint8_t* src, size_t src_len, u
     return ret;
 
 jpeg_hw_dec_failed:
-    if (out_buf) {
+    if (out_buf && preallocated_out == NULL) {
         heap_caps_free(out_buf);
         out_buf = NULL;
     }
@@ -253,12 +281,34 @@ esp_err_t jpeg_to_image(const uint8_t* src, size_t src_len, uint8_t** out, size_
         return ESP_ERR_INVALID_ARG;
     }
 #ifdef CONFIG_XIAOZHI_ENABLE_HARDWARE_JPEG_DECODER
-    esp_err_t ret = decode_with_hardware_jpeg(src, src_len, out, out_len, width, height, stride);
+    esp_err_t ret = decode_with_hardware_jpeg(src, src_len, out, out_len, width, height, stride, NULL, 0);
     if (ret == ESP_OK) {
         return ret;
     }
     ESP_LOGW(TAG, "Failed to decode with hardware JPEG, fallback to software decoder");
     // Fallback to esp_new_jpeg
 #endif
-    return decode_with_new_jpeg(src, src_len, out, out_len, width, height, stride);
+    return decode_with_new_jpeg(src, src_len, out, out_len, width, height, stride, NULL, 0);
+}
+
+esp_err_t jpeg_to_image_into(const uint8_t* src, size_t src_len, uint8_t* out, size_t out_cap, size_t* out_len,
+                             size_t* width, size_t* height, size_t* stride) {
+#ifdef CONFIG_XIAOZHI_ENABLE_CAMERA_DEBUG_MODE
+    esp_log_level_set(TAG, ESP_LOG_DEBUG);
+#endif  // CONFIG_XIAOZHI_ENABLE_CAMERA_DEBUG_MODE
+    if (src == NULL || src_len == 0 || out == NULL || out_cap == 0 || out_len == NULL || width == NULL ||
+        height == NULL || stride == NULL) {
+        ESP_LOGE(TAG, "Invalid parameters");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t* decoded = out;
+#ifdef CONFIG_XIAOZHI_ENABLE_HARDWARE_JPEG_DECODER
+    esp_err_t ret = decode_with_hardware_jpeg(src, src_len, &decoded, out_len, width, height, stride, out, out_cap);
+    if (ret == ESP_OK) {
+        return ret;
+    }
+    ESP_LOGW(TAG, "Failed to decode with hardware JPEG into caller buffer, fallback to software decoder");
+#endif
+    return decode_with_new_jpeg(src, src_len, &decoded, out_len, width, height, stride, out, out_cap);
 }
