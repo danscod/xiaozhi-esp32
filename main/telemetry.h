@@ -45,11 +45,7 @@ public:
         int audio_push_block_count,
         int max_audio_push_block_ms,
         int late_frame_count,
-        int max_frame_late_ms,
-        int range_request_count,
-        int range_retry_count,
-        int timeline_resync_count,
-        int max_timeline_resync_ms);
+        int max_frame_late_ms);
     void PostVideoPlaybackProgress(
         const std::string& item_id,
         const std::string& title,
@@ -62,11 +58,7 @@ public:
         int max_audio_push_block_ms,
         int late_frame_count,
         int max_frame_late_ms,
-        int queued_video_frames,
-        int range_request_count,
-        int range_retry_count,
-        int timeline_resync_count,
-        int max_timeline_resync_ms);
+        int queued_video_frames);
 
 private:
     Telemetry() = default;
