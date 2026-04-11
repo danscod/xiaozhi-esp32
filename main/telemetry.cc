@@ -177,11 +177,16 @@ void Telemetry::PostVideoPlaybackStats(
         int audio_push_block_count,
         int max_audio_push_block_ms,
         int late_frame_count,
-        int max_frame_late_ms) {
+        int max_frame_late_ms,
+        int range_request_count,
+        int range_retry_count,
+        int timeline_resync_count,
+        int max_timeline_resync_ms) {
     PostEventAsync("video_playback_end", 0,
         [item_id, title, duration_ms, rendered_frames, dropped_frames, http_read_stalls,
          max_http_read_stall_ms, audio_push_block_count, max_audio_push_block_ms,
-         late_frame_count, max_frame_late_ms](cJSON* root) {
+         late_frame_count, max_frame_late_ms, range_request_count, range_retry_count,
+         timeline_resync_count, max_timeline_resync_ms](cJSON* root) {
             cJSON_AddStringToObject(root, "item_id", item_id.c_str());
             cJSON_AddStringToObject(root, "title", title.c_str());
             cJSON_AddNumberToObject(root, "playback_duration_ms", duration_ms);
@@ -193,6 +198,10 @@ void Telemetry::PostVideoPlaybackStats(
             cJSON_AddNumberToObject(root, "max_audio_push_block_ms", max_audio_push_block_ms);
             cJSON_AddNumberToObject(root, "late_frame_count", late_frame_count);
             cJSON_AddNumberToObject(root, "max_frame_late_ms", max_frame_late_ms);
+            cJSON_AddNumberToObject(root, "range_request_count", range_request_count);
+            cJSON_AddNumberToObject(root, "range_retry_count", range_retry_count);
+            cJSON_AddNumberToObject(root, "timeline_resync_count", timeline_resync_count);
+            cJSON_AddNumberToObject(root, "max_timeline_resync_ms", max_timeline_resync_ms);
         });
 }
 
@@ -208,11 +217,16 @@ void Telemetry::PostVideoPlaybackProgress(
         int max_audio_push_block_ms,
         int late_frame_count,
         int max_frame_late_ms,
-        int queued_video_frames) {
+        int queued_video_frames,
+        int range_request_count,
+        int range_retry_count,
+        int timeline_resync_count,
+        int max_timeline_resync_ms) {
     PostEventAsync("video_playback_progress", 0,
         [item_id, title, duration_ms, rendered_frames, dropped_frames, http_read_stalls,
          max_http_read_stall_ms, audio_push_block_count, max_audio_push_block_ms,
-         late_frame_count, max_frame_late_ms, queued_video_frames](cJSON* root) {
+         late_frame_count, max_frame_late_ms, queued_video_frames, range_request_count,
+         range_retry_count, timeline_resync_count, max_timeline_resync_ms](cJSON* root) {
             cJSON_AddStringToObject(root, "item_id", item_id.c_str());
             cJSON_AddStringToObject(root, "title", title.c_str());
             cJSON_AddNumberToObject(root, "playback_duration_ms", duration_ms);
@@ -225,5 +239,9 @@ void Telemetry::PostVideoPlaybackProgress(
             cJSON_AddNumberToObject(root, "late_frame_count", late_frame_count);
             cJSON_AddNumberToObject(root, "max_frame_late_ms", max_frame_late_ms);
             cJSON_AddNumberToObject(root, "queued_video_frames", queued_video_frames);
+            cJSON_AddNumberToObject(root, "range_request_count", range_request_count);
+            cJSON_AddNumberToObject(root, "range_retry_count", range_retry_count);
+            cJSON_AddNumberToObject(root, "timeline_resync_count", timeline_resync_count);
+            cJSON_AddNumberToObject(root, "max_timeline_resync_ms", max_timeline_resync_ms);
         });
 }

@@ -86,6 +86,10 @@ private:
         int64_t max_audio_push_block_us = 0;
         size_t late_frame_count = 0;
         int64_t max_frame_late_us = 0;
+        size_t range_request_count = 0;
+        size_t range_retry_count = 0;
+        size_t timeline_resync_count = 0;
+        int64_t max_timeline_resync_us = 0;
     };
 
     static void StreamReaderTask(void* arg);
@@ -138,7 +142,12 @@ private:
     static constexpr size_t   kMaxQueuedVideoFrames = 10;
     static constexpr size_t   kAudioPrebufferPackets = 4;              // 240 ms
     static constexpr int64_t  kLateFrameDropUs = 500000;               // allow a wider sync window
+    static constexpr int64_t  kTimelineResyncUs = 1500000;             // re-anchor after >1.5 s drift
     static constexpr int64_t  kHttpReadStallWarnUs = 80000;            // >80 ms read gap
     static constexpr int64_t  kAudioPushBlockWarnUs = 20000;           // >20 ms queue wait
+    static constexpr int      kRangeFetchTimeoutMs = 15000;
+    static constexpr int      kRangeFetchRetryDelayMs = 150;
+    static constexpr int      kRangeFetchRetries = 3;
+    static constexpr size_t   kRangeChunkBytes = 384 * 1024;
     static constexpr int64_t  kPlaybackProgressIntervalUs = 5000000;   // 5 s
 };

@@ -16,9 +16,37 @@
 #include <esp_heap_caps.h>
 #include <cJSON.h>
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #define TAG "VideoPlayer"
+
+namespace {
+bool ParseContentRangeHeader(const std::string& header,
+                             size_t* range_start,
+                             size_t* range_end,
+                             size_t* total_size) {
+    if (header.empty()) {
+        return false;
+    }
+    size_t start = 0;
+    size_t end = 0;
+    size_t total = 0;
+    if (sscanf(header.c_str(), "bytes %zu-%zu/%zu", &start, &end, &total) != 3) {
+        return false;
+    }
+    if (range_start) {
+        *range_start = start;
+    }
+    if (range_end) {
+        *range_end = end;
+    }
+    if (total_size) {
+        *total_size = total;
+    }
+    return true;
+}
+}  // namespace
 
 // ── Singleton ─────────────────────────────────────────────────────────────────
 
@@ -62,7 +90,11 @@ void VideoPlayer::MaybePostPlaybackProgress() {
         static_cast<int>(playback_stats_.max_audio_push_block_us / 1000),
         static_cast<int>(playback_stats_.late_frame_count),
         static_cast<int>(playback_stats_.max_frame_late_us / 1000),
-        queued_video_frames);
+        queued_video_frames,
+        static_cast<int>(playback_stats_.range_request_count),
+        static_cast<int>(playback_stats_.range_retry_count),
+        static_cast<int>(playback_stats_.timeline_resync_count),
+        static_cast<int>(playback_stats_.max_timeline_resync_us / 1000));
 }
 
 void VideoPlayer::MaybeFinishPlayback() {
@@ -89,17 +121,26 @@ void VideoPlayer::MaybeFinishPlayback() {
                 static_cast<int>(playback_stats_.audio_push_block_count),
                 static_cast<int>(playback_stats_.max_audio_push_block_us / 1000),
                 static_cast<int>(playback_stats_.late_frame_count),
-                static_cast<int>(playback_stats_.max_frame_late_us / 1000));
+                static_cast<int>(playback_stats_.max_frame_late_us / 1000),
+                static_cast<int>(playback_stats_.range_request_count),
+                static_cast<int>(playback_stats_.range_retry_count),
+                static_cast<int>(playback_stats_.timeline_resync_count),
+                static_cast<int>(playback_stats_.max_timeline_resync_us / 1000));
             ESP_LOGI(TAG,
                      "Playback stats: rendered=%zu dropped=%zu http_stalls=%zu max_http_ms=%lld "
-                     "audio_push_blocks=%zu max_audio_push_ms=%lld late_frames=%zu max_late_ms=%lld",
+                     "audio_push_blocks=%zu max_audio_push_ms=%lld late_frames=%zu max_late_ms=%lld "
+                     "range_requests=%zu range_retries=%zu resyncs=%zu max_resync_ms=%lld",
                      playback_stats_.rendered_frames, playback_stats_.dropped_frames,
                      playback_stats_.http_read_stalls,
                      (long long)(playback_stats_.max_http_read_stall_us / 1000),
                      playback_stats_.audio_push_block_count,
                      (long long)(playback_stats_.max_audio_push_block_us / 1000),
                      playback_stats_.late_frame_count,
-                     (long long)(playback_stats_.max_frame_late_us / 1000));
+                     (long long)(playback_stats_.max_frame_late_us / 1000),
+                     playback_stats_.range_request_count,
+                     playback_stats_.range_retry_count,
+                     playback_stats_.timeline_resync_count,
+                     (long long)(playback_stats_.max_timeline_resync_us / 1000));
         }
         Application::GetInstance().Schedule([this]() { StopPlayback(); });
     }
@@ -190,6 +231,14 @@ void VideoPlayer::RegisterMcpTools() {
                                     static_cast<double>(playback_stats_.late_frame_count));
             cJSON_AddNumberToObject(root, "max_frame_late_ms",
                                     static_cast<double>(playback_stats_.max_frame_late_us / 1000));
+            cJSON_AddNumberToObject(root, "range_request_count",
+                                    static_cast<double>(playback_stats_.range_request_count));
+            cJSON_AddNumberToObject(root, "range_retry_count",
+                                    static_cast<double>(playback_stats_.range_retry_count));
+            cJSON_AddNumberToObject(root, "timeline_resync_count",
+                                    static_cast<double>(playback_stats_.timeline_resync_count));
+            cJSON_AddNumberToObject(root, "max_timeline_resync_ms",
+                                    static_cast<double>(playback_stats_.max_timeline_resync_us / 1000));
             if (state_ == State::kError) {
                 cJSON_AddStringToObject(root, "error", error_msg_.c_str());
             }
@@ -444,6 +493,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         {
             std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
             self->reader_done_.store(true);
+            self->playback_started_.store(true);
             self->video_queue_cv_.notify_all();
         }
         self->MaybeFinishPlayback();
@@ -456,63 +506,178 @@ void VideoPlayer::StreamReaderTask(void* arg) {
     // call ResetDecoder(), which breaks the audio backpressure clock.
     Application::GetInstance().GetAudioService().EnableWakeWordDetection(false);
 
-    ESP_LOGI(TAG, "Streaming video: %s", self->stream_url_.c_str());
+    uint8_t* range_buf = static_cast<uint8_t*>(
+        heap_caps_malloc(kRangeChunkBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!range_buf) {
+        ESP_LOGE(TAG, "Range buffer allocation failed");
+        heap_caps_free(jpeg_buf);
+        self->state_ = State::kError;
+        self->error_msg_ = "out of memory";
+        Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
+        Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
+        self->stream_task_handle_ = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+            self->reader_done_.store(true);
+            self->playback_started_.store(true);
+            self->video_queue_cv_.notify_all();
+        }
+        self->MaybeFinishPlayback();
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Streaming video via ranged fetch: %s", self->stream_url_.c_str());
 
     auto& board   = Board::GetInstance();
     auto  network = board.GetNetwork();
-    auto  http    = network->CreateHttp(0);
-
-    http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
-    http->SetHeader("Device-Id",  SystemInfo::GetMacAddress().c_str());
-
-    if (!http->Open("GET", self->stream_url_)) {
-        ESP_LOGE(TAG, "StreamReaderTask: HTTP open failed");
-        heap_caps_free(jpeg_buf);
-        self->state_ = State::kError;
-        self->error_msg_ = "network error";
-        Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
-        self->stream_task_handle_ = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
-            self->reader_done_.store(true);
-            self->video_queue_cv_.notify_all();
-        }
-        Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
-        self->MaybeFinishPlayback();
-        vTaskDelete(nullptr);
-        return;
-    }
-    if (http->GetStatusCode() != 200) {
-        int code = http->GetStatusCode();
-        http->Close();
-        ESP_LOGE(TAG, "StreamReaderTask: HTTP %d", code);
-        heap_caps_free(jpeg_buf);
-        self->state_ = State::kError;
-        self->error_msg_ = "HTTP " + std::to_string(code);
-        Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
-        self->stream_task_handle_ = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
-            self->reader_done_.store(true);
-            self->video_queue_cv_.notify_all();
-        }
-        Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
-        self->MaybeFinishPlayback();
-        vTaskDelete(nullptr);
-        return;
-    }
 
     auto& audio = Application::GetInstance().GetAudioService();
-    auto read_with_stats = [self, &http](uint8_t* dst, int len) -> int {
-        int64_t read_start_us = esp_timer_get_time();
-        int n = http->Read(reinterpret_cast<char*>(dst), len);
-        int64_t read_elapsed_us = esp_timer_get_time() - read_start_us;
-        if (read_elapsed_us >= kHttpReadStallWarnUs) {
+    auto record_http_gap = [self](int64_t elapsed_us) {
+        if (elapsed_us >= kHttpReadStallWarnUs) {
             self->playback_stats_.http_read_stalls++;
             self->playback_stats_.max_http_read_stall_us =
-                std::max(self->playback_stats_.max_http_read_stall_us, read_elapsed_us);
+                std::max(self->playback_stats_.max_http_read_stall_us, elapsed_us);
         }
-        return n;
+    };
+
+    size_t range_buf_size = 0;
+    size_t range_buf_offset = 0;
+    size_t next_range_offset = 0;
+    size_t total_stream_size = 0;
+    bool total_stream_size_known = false;
+    bool stream_eof = false;
+    bool range_fetch_failed = false;
+
+    auto fetch_range_chunk = [&](size_t start_offset) -> bool {
+        if (self->stop_requested_.load()) {
+            return false;
+        }
+        if (total_stream_size_known && start_offset >= total_stream_size) {
+            stream_eof = true;
+            return false;
+        }
+
+        for (int attempt = 0; attempt < kRangeFetchRetries && !self->stop_requested_.load(); ++attempt) {
+            if (attempt > 0) {
+                self->playback_stats_.range_retry_count++;
+                vTaskDelay(pdMS_TO_TICKS(kRangeFetchRetryDelayMs));
+            }
+
+            size_t end_offset = start_offset + kRangeChunkBytes - 1;
+            if (total_stream_size_known && end_offset >= total_stream_size) {
+                end_offset = total_stream_size - 1;
+            }
+
+            auto http = network->CreateHttp(0);
+            http->SetTimeout(kRangeFetchTimeoutMs);
+            http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
+            http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+            http->SetHeader("Accept-Encoding", "identity");
+
+            char range_header[64];
+            snprintf(range_header, sizeof(range_header), "bytes=%zu-%zu", start_offset, end_offset);
+            http->SetHeader("Range", range_header);
+
+            self->playback_stats_.range_request_count++;
+            int64_t open_start_us = esp_timer_get_time();
+            if (!http->Open("GET", self->stream_url_)) {
+                record_http_gap(esp_timer_get_time() - open_start_us);
+                ESP_LOGW(TAG, "Range fetch open failed at offset %zu (attempt %d)",
+                         start_offset, attempt + 1);
+                continue;
+            }
+            record_http_gap(esp_timer_get_time() - open_start_us);
+
+            int code = http->GetStatusCode();
+            if (code != 206 && !(code == 200 && start_offset == 0)) {
+                ESP_LOGE(TAG, "Range fetch returned HTTP %d at offset %zu", code, start_offset);
+                http->Close();
+                break;
+            }
+
+            size_t body_len = http->GetBodyLength();
+            if (code == 206) {
+                size_t range_start = 0;
+                size_t range_end = 0;
+                size_t total_size = 0;
+                std::string content_range = http->GetResponseHeader("content-range");
+                if (ParseContentRangeHeader(content_range, &range_start, &range_end, &total_size)) {
+                    body_len = range_end >= range_start ? (range_end - range_start + 1) : body_len;
+                    total_stream_size = total_size;
+                    total_stream_size_known = true;
+                }
+            } else if (code == 200 && body_len > 0) {
+                total_stream_size = body_len;
+                total_stream_size_known = true;
+            }
+
+            if (body_len == 0) {
+                ESP_LOGE(TAG, "Range fetch returned no body length at offset %zu", start_offset);
+                http->Close();
+                break;
+            }
+            if (body_len > kRangeChunkBytes) {
+                ESP_LOGE(TAG, "Range fetch body too large at offset %zu: %zu bytes", start_offset, body_len);
+                http->Close();
+                break;
+            }
+
+            size_t got = 0;
+            while (got < body_len && !self->stop_requested_.load()) {
+                int64_t read_start_us = esp_timer_get_time();
+                int n = http->Read(reinterpret_cast<char*>(range_buf + got), body_len - got);
+                int64_t read_elapsed_us = esp_timer_get_time() - read_start_us;
+                record_http_gap(read_elapsed_us);
+                if (n <= 0) {
+                    break;
+                }
+                got += static_cast<size_t>(n);
+            }
+            http->Close();
+
+            if (got == 0) {
+                ESP_LOGW(TAG, "Range fetch got no data at offset %zu (attempt %d)",
+                         start_offset, attempt + 1);
+                continue;
+            }
+
+            range_buf_size = got;
+            range_buf_offset = 0;
+            next_range_offset = start_offset + got;
+            if (total_stream_size_known && next_range_offset >= total_stream_size) {
+                stream_eof = true;
+            }
+            if (got < body_len) {
+                self->playback_stats_.range_retry_count++;
+                ESP_LOGW(TAG, "Range fetch short read at offset %zu: got=%zu wanted=%zu",
+                         start_offset, got, body_len);
+            }
+            return true;
+        }
+
+        range_fetch_failed = true;
+        return false;
+    };
+
+    auto read_with_stats = [&](uint8_t* dst, int len) -> int {
+        int total = 0;
+        while (total < len && !self->stop_requested_.load()) {
+            if (range_buf_offset >= range_buf_size) {
+                if (stream_eof) {
+                    break;
+                }
+                if (!fetch_range_chunk(next_range_offset)) {
+                    break;
+                }
+            }
+            size_t available = range_buf_size - range_buf_offset;
+            size_t to_copy = std::min(available, static_cast<size_t>(len - total));
+            memcpy(dst + total, range_buf + range_buf_offset, to_copy);
+            range_buf_offset += to_copy;
+            total += static_cast<int>(to_copy);
+        }
+        return total;
     };
 
     // Binary frame header: 4× uint32_t big-endian.
@@ -620,8 +785,12 @@ void VideoPlayer::StreamReaderTask(void* arg) {
     }
 
 stream_done:
-    http->Close();
     heap_caps_free(jpeg_buf);
+    heap_caps_free(range_buf);
+
+    if (range_fetch_failed && !self->stop_requested_.load() && !stream_eof) {
+        ESP_LOGW(TAG, "StreamReaderTask: ranged fetch failed before EOF");
+    }
 
     {
         std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
@@ -731,6 +900,18 @@ void VideoPlayer::VideoRenderTask(void* arg) {
         if (target_us > now_us) {
             int64_t sleep_us = target_us - now_us;
             vTaskDelay(pdMS_TO_TICKS((sleep_us + 999) / 1000));
+        } else if (target_us + kTimelineResyncUs < now_us) {
+            int64_t late_us = now_us - target_us;
+            self->playback_stats_.late_frame_count++;
+            self->playback_stats_.max_frame_late_us =
+                std::max(self->playback_stats_.max_frame_late_us, late_us);
+            self->playback_stats_.timeline_resync_count++;
+            self->playback_stats_.max_timeline_resync_us =
+                std::max(self->playback_stats_.max_timeline_resync_us, late_us);
+            playback_base_us = now_us - (static_cast<int64_t>(frame->ts_ms) * 1000);
+            self->playback_start_us_ = playback_base_us;
+            ESP_LOGW(TAG, "Resyncing video timeline (late=%lld ms, ts=%" PRIu32 ")",
+                     (long long)(late_us / 1000), frame->ts_ms);
         } else if (target_us + kLateFrameDropUs < now_us) {
             int64_t late_us = now_us - target_us;
             self->playback_stats_.late_frame_count++;
