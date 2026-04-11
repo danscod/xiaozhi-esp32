@@ -117,26 +117,17 @@ char* Telemetry::BuildJson(const char* event_type, int conversation_duration_ms,
 // Struct passed to the POST task
 struct TelemetryPostArgs {
     char* json;
-    bool* posting_flag;
 };
 
 void Telemetry::PostEventAsync(const char* event_type, int conversation_duration_ms,
                               std::function<void(cJSON* root)> extra_fields) {
-    if (posting_) {
-        ESP_LOGD(TAG, "Skipping %s — previous POST in flight", event_type);
-        return;
-    }
-
     char* json = BuildJson(event_type, conversation_duration_ms, extra_fields);
     if (!json) {
         ESP_LOGE(TAG, "Failed to build JSON for %s", event_type);
         return;
     }
 
-    posting_ = true;
-
-    // Capture everything the task needs
-    auto* args = new TelemetryPostArgs{ json, &posting_ };
+    auto* args = new TelemetryPostArgs{ json };
 
     xTaskCreate(
         [](void* param) {
@@ -164,7 +155,6 @@ void Telemetry::PostEventAsync(const char* event_type, int conversation_duration
             }
 
             free(a->json);
-            *a->posting_flag = false;
             delete a;
             vTaskDelete(nullptr);
         },
@@ -203,5 +193,37 @@ void Telemetry::PostVideoPlaybackStats(
             cJSON_AddNumberToObject(root, "max_audio_push_block_ms", max_audio_push_block_ms);
             cJSON_AddNumberToObject(root, "late_frame_count", late_frame_count);
             cJSON_AddNumberToObject(root, "max_frame_late_ms", max_frame_late_ms);
+        });
+}
+
+void Telemetry::PostVideoPlaybackProgress(
+        const std::string& item_id,
+        const std::string& title,
+        int duration_ms,
+        int rendered_frames,
+        int dropped_frames,
+        int http_read_stalls,
+        int max_http_read_stall_ms,
+        int audio_push_block_count,
+        int max_audio_push_block_ms,
+        int late_frame_count,
+        int max_frame_late_ms,
+        int queued_video_frames) {
+    PostEventAsync("video_playback_progress", 0,
+        [item_id, title, duration_ms, rendered_frames, dropped_frames, http_read_stalls,
+         max_http_read_stall_ms, audio_push_block_count, max_audio_push_block_ms,
+         late_frame_count, max_frame_late_ms, queued_video_frames](cJSON* root) {
+            cJSON_AddStringToObject(root, "item_id", item_id.c_str());
+            cJSON_AddStringToObject(root, "title", title.c_str());
+            cJSON_AddNumberToObject(root, "playback_duration_ms", duration_ms);
+            cJSON_AddNumberToObject(root, "rendered_frames", rendered_frames);
+            cJSON_AddNumberToObject(root, "dropped_frames", dropped_frames);
+            cJSON_AddNumberToObject(root, "http_read_stalls", http_read_stalls);
+            cJSON_AddNumberToObject(root, "max_http_read_stall_ms", max_http_read_stall_ms);
+            cJSON_AddNumberToObject(root, "audio_push_block_count", audio_push_block_count);
+            cJSON_AddNumberToObject(root, "max_audio_push_block_ms", max_audio_push_block_ms);
+            cJSON_AddNumberToObject(root, "late_frame_count", late_frame_count);
+            cJSON_AddNumberToObject(root, "max_frame_late_ms", max_frame_late_ms);
+            cJSON_AddNumberToObject(root, "queued_video_frames", queued_video_frames);
         });
 }

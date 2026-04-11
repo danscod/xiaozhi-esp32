@@ -31,6 +31,40 @@ std::string VideoPlayer::PlayItem(const std::string& item_id) {
     return StartItem(item_id);
 }
 
+void VideoPlayer::MaybePostPlaybackProgress() {
+    if (playback_stats_reported_ || playback_stats_.start_us <= 0 || current_id_.empty()) {
+        return;
+    }
+
+    int64_t now_us = esp_timer_get_time();
+    int64_t last_post_us = last_progress_post_us_.load();
+    if (last_post_us != 0 && now_us - last_post_us < kPlaybackProgressIntervalUs) {
+        return;
+    }
+    last_progress_post_us_.store(now_us);
+
+    int queued_video_frames = 0;
+    {
+        std::lock_guard<std::mutex> lock(video_queue_mutex_);
+        queued_video_frames = static_cast<int>(video_queue_.size());
+    }
+
+    int duration_ms = static_cast<int>((now_us - playback_stats_.start_us) / 1000);
+    Telemetry::GetInstance().PostVideoPlaybackProgress(
+        current_id_,
+        current_title_,
+        duration_ms,
+        static_cast<int>(playback_stats_.rendered_frames),
+        static_cast<int>(playback_stats_.dropped_frames),
+        static_cast<int>(playback_stats_.http_read_stalls),
+        static_cast<int>(playback_stats_.max_http_read_stall_us / 1000),
+        static_cast<int>(playback_stats_.audio_push_block_count),
+        static_cast<int>(playback_stats_.max_audio_push_block_us / 1000),
+        static_cast<int>(playback_stats_.late_frame_count),
+        static_cast<int>(playback_stats_.max_frame_late_us / 1000),
+        queued_video_frames);
+}
+
 void VideoPlayer::MaybeFinishPlayback() {
     bool should_finish = false;
     {
@@ -251,6 +285,7 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
         playback_stats_ = {};
         playback_stats_.start_us = esp_timer_get_time();
         playback_stats_reported_ = false;
+        last_progress_post_us_.store(0);
         state_ = State::kLoading;
         UpdateDisplay();
         Application::GetInstance().EndVoiceSessionForMedia();
@@ -294,6 +329,7 @@ void VideoPlayer::StopPlayback() {
         dropped_frames_ = 0;
         playback_stats_ = {};
         playback_stats_reported_ = false;
+        last_progress_post_us_.store(0);
     }
     stop_requested_.store(false);
     paused_.store(false);
@@ -577,6 +613,10 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         } else {
             ESP_LOGW(TAG, "Unknown frame type %" PRIu32 ", skipping", ftype);
         }
+
+        if (self->playback_started_.load()) {
+            self->MaybePostPlaybackProgress();
+        }
     }
 
 stream_done:
@@ -724,6 +764,8 @@ void VideoPlayer::VideoRenderTask(void* arg) {
             rendered_frames++;
             self->playback_stats_.rendered_frames = rendered_frames;
         }
+
+        self->MaybePostPlaybackProgress();
     }
 
     ESP_LOGI(TAG, "VideoRenderTask: rendered=%zu dropped=%zu stopped=%d",

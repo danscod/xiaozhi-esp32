@@ -68,6 +68,7 @@ private:
     void CreateVideoScreen();
     void DestroyVideoScreen();
     void UpdateDisplay();
+    void MaybePostPlaybackProgress();
     void MaybeFinishPlayback();
 
     struct QueuedVideoFrame {
@@ -112,6 +113,7 @@ private:
     size_t dropped_frames_ = 0;
     PlaybackStats playback_stats_;
     bool playback_stats_reported_ = false;
+    std::atomic<int64_t> last_progress_post_us_{0};
 
     // PSRAM framebuffers — allocated in VideoStreamTask, freed in StopPlayback.
     uint8_t* frame_buf_a_ = nullptr;   // currently on display
@@ -138,4 +140,5 @@ private:
     static constexpr int64_t  kLateFrameDropUs = 500000;               // allow a wider sync window
     static constexpr int64_t  kHttpReadStallWarnUs = 80000;            // >80 ms read gap
     static constexpr int64_t  kAudioPushBlockWarnUs = 20000;           // >20 ms queue wait
+    static constexpr int64_t  kPlaybackProgressIntervalUs = 5000000;   // 5 s
 };

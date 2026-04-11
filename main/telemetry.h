@@ -16,6 +16,7 @@ struct cJSON;
  *   conversation_start — when device transitions to connecting/listening
  *   conversation_end   — when device returns to idle from a conversation
  *   wake_word         — each time the wake word fires
+ *   video_playback_progress — periodic during active video playback
  *   video_playback_end — emitted when video playback stops, with transport/render stats
  */
 class Telemetry {
@@ -45,6 +46,19 @@ public:
         int max_audio_push_block_ms,
         int late_frame_count,
         int max_frame_late_ms);
+    void PostVideoPlaybackProgress(
+        const std::string& item_id,
+        const std::string& title,
+        int duration_ms,
+        int rendered_frames,
+        int dropped_frames,
+        int http_read_stalls,
+        int max_http_read_stall_ms,
+        int audio_push_block_count,
+        int max_audio_push_block_ms,
+        int late_frame_count,
+        int max_frame_late_ms,
+        int queued_video_frames);
 
 private:
     Telemetry() = default;
@@ -63,8 +77,6 @@ private:
     int  wake_word_count_     = 0;
     bool in_conversation_     = false;
     int64_t conv_start_us_    = 0;
-    bool posting_             = false;   // guard: skip if previous POST still in flight
-
     esp_timer_handle_t heartbeat_timer_ = nullptr;
 
     static constexpr const char* kUrl =
