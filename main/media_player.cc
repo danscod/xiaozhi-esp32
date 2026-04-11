@@ -3,6 +3,7 @@
 #include "board.h"
 #include "system_info.h"
 #include "application.h"
+#include "video_player.h"
 #include "audio/audio_service.h"
 #include "audio/demuxer/ogg_demuxer.h"
 #include "display/display.h"
@@ -67,8 +68,12 @@ void MediaPlayer::RegisterMcpTools() {
         "Stop the currently playing media. Does nothing if nothing is playing.",
         PropertyList(),
         [this](const PropertyList& props) -> ReturnValue {
-            if (state_ == State::kIdle) {
+            if (state_ == State::kIdle &&
+                VideoPlayer::GetInstance().GetState() == VideoPlayer::State::kIdle) {
                 return std::string("Nothing is playing.");
+            }
+            if (VideoPlayer::GetInstance().GetState() != VideoPlayer::State::kIdle) {
+                VideoPlayer::GetInstance().Stop();
             }
             Stop();
             return std::string("Stopped.");
@@ -81,6 +86,25 @@ void MediaPlayer::RegisterMcpTools() {
         "Get the current media playback status.",
         PropertyList(),
         [this](const PropertyList& props) -> ReturnValue {
+            auto& video = VideoPlayer::GetInstance();
+            if (video.GetState() != VideoPlayer::State::kIdle) {
+                cJSON* root = cJSON_CreateObject();
+                const char* state_str = "idle";
+                switch (video.GetState()) {
+                    case VideoPlayer::State::kLoading: state_str = "loading"; break;
+                    case VideoPlayer::State::kPlaying: state_str = "playing"; break;
+                    case VideoPlayer::State::kError:   state_str = "error";   break;
+                    default:                           state_str = "idle";    break;
+                }
+                cJSON_AddStringToObject(root, "state",         state_str);
+                cJSON_AddStringToObject(root, "kind",          "video");
+                cJSON_AddStringToObject(root, "current_id",    video.GetCurrentId().c_str());
+                cJSON_AddStringToObject(root, "current_title", video.GetCurrentTitle().c_str());
+                if (video.GetState() == VideoPlayer::State::kError) {
+                    cJSON_AddStringToObject(root, "error", video.GetError().c_str());
+                }
+                return root;
+            }
             cJSON* root = cJSON_CreateObject();
             const char* state_str = "idle";
             switch (state_) {
@@ -167,10 +191,15 @@ std::string MediaPlayer::StartItem(const std::string& item_id) {
         return "Error: bad response from media server.";
     }
     auto* title_j = cJSON_GetObjectItem(root, "title");
+    auto* type_j  = cJSON_GetObjectItem(root, "type");
     auto* url_j   = cJSON_GetObjectItem(root, "url");
     if (!cJSON_IsString(title_j) || !cJSON_IsString(url_j)) {
         cJSON_Delete(root);
         return "Error: item metadata incomplete.";
+    }
+    if (cJSON_IsString(type_j) && std::strcmp(type_j->valuestring, "video") == 0) {
+        cJSON_Delete(root);
+        return VideoPlayer::GetInstance().PlayItem(item_id);
     }
     std::string saved_title = title_j->valuestring;
     std::string saved_url   = url_j->valuestring;

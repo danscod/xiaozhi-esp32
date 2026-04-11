@@ -24,6 +24,10 @@ VideoPlayer& VideoPlayer::GetInstance() {
     return instance;
 }
 
+std::string VideoPlayer::PlayItem(const std::string& item_id) {
+    return StartItem(item_id);
+}
+
 // ── MCP tool registration ─────────────────────────────────────────────────────
 
 void VideoPlayer::RegisterMcpTools() {
