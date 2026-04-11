@@ -1,7 +1,13 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -24,8 +30,8 @@
  * Thread safety:
  *   - Start() / Stop() acquire the display LVGL lock when modifying screen objects.
  *   - stop_requested_ is atomic — safe to set from any task / button callback.
- *   - VideoStreamTask runs on its own FreeRTOS task; all LVGL calls inside the
- *     task are bracketed by DisplayLockGuard.
+ *   - StreamReaderTask reads/demuxes the HTTP .axv stream.
+ *   - VideoRenderTask decodes JPEGs and updates LVGL.
  */
 class VideoPlayer {
 public:
@@ -62,8 +68,15 @@ private:
     void CreateVideoScreen();
     void DestroyVideoScreen();
     void UpdateDisplay();
+    void MaybeFinishPlayback();
 
-    static void VideoStreamTask(void* arg);
+    struct QueuedVideoFrame {
+        uint32_t ts_ms = 0;
+        std::vector<uint8_t> jpeg;
+    };
+
+    static void StreamReaderTask(void* arg);
+    static void VideoRenderTask(void* arg);
 
     // Playback state
     State        state_       = State::kIdle;
@@ -73,8 +86,18 @@ private:
     std::string  error_msg_;
 
     TaskHandle_t stream_task_handle_ = nullptr;
+    TaskHandle_t render_task_handle_ = nullptr;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> paused_{false};
+    std::atomic<bool> reader_done_{false};
+    std::atomic<bool> playback_started_{false};
+    std::atomic<bool> render_failed_{false};
+
+    std::mutex video_queue_mutex_;
+    std::condition_variable video_queue_cv_;
+    std::deque<std::unique_ptr<QueuedVideoFrame>> video_queue_;
+    int64_t playback_start_us_ = 0;
+    size_t dropped_frames_ = 0;
 
     // PSRAM framebuffers — allocated in VideoStreamTask, freed in StopPlayback.
     uint8_t* frame_buf_a_ = nullptr;   // currently on display
@@ -96,4 +119,7 @@ private:
     static constexpr size_t   kFrameH        = 240;
     static constexpr size_t   kFrameBytes    = kFrameW * kFrameH * 2;  // RGB565
     static constexpr size_t   kJpegBufSize   = 32 * 1024;              // 32 KB max JPEG
+    static constexpr size_t   kMaxQueuedVideoFrames = 6;
+    static constexpr size_t   kAudioPrebufferPackets = 6;              // 360 ms
+    static constexpr int64_t  kLateFrameDropUs = 150000;               // drop if >150 ms late
 };

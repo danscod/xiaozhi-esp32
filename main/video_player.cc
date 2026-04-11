@@ -10,6 +10,7 @@
 #include "display/lvgl_display/jpg/jpeg_to_image.h"
 
 #include <lvgl.h>
+#include <esp_timer.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <cJSON.h>
@@ -26,6 +27,18 @@ VideoPlayer& VideoPlayer::GetInstance() {
 
 std::string VideoPlayer::PlayItem(const std::string& item_id) {
     return StartItem(item_id);
+}
+
+void VideoPlayer::MaybeFinishPlayback() {
+    bool should_finish = false;
+    {
+        std::lock_guard<std::mutex> lock(video_queue_mutex_);
+        should_finish = (stream_task_handle_ == nullptr &&
+                         render_task_handle_ == nullptr);
+    }
+    if (should_finish) {
+        Application::GetInstance().Schedule([this]() { StopPlayback(); });
+    }
 }
 
 // ── MCP tool registration ─────────────────────────────────────────────────────
@@ -187,11 +200,18 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
         current_title_ = saved_title;
         current_id_    = item_id;
         stream_url_    = saved_url;
+        reader_done_.store(false);
+        playback_started_.store(false);
+        render_failed_.store(false);
+        dropped_frames_ = 0;
+        playback_start_us_ = 0;
         state_ = State::kLoading;
         UpdateDisplay();
 
-        xTaskCreate(VideoStreamTask, "video_stream", 20480, this, 2,
+        xTaskCreate(StreamReaderTask, "video_stream", 20480, this, 2,
                     &stream_task_handle_);
+        xTaskCreate(VideoRenderTask, "video_render", 20480, this, 2,
+                    &render_task_handle_);
     });
 
     return std::string("");
@@ -203,6 +223,7 @@ void VideoPlayer::Stop() {
     if (state_ == State::kIdle) return;
     paused_.store(false);          // unblock stream task so it sees stop_requested_
     stop_requested_.store(true);
+    video_queue_cv_.notify_all();
     Application::GetInstance().GetAudioService().ResetDecoder();
 }
 
@@ -219,13 +240,24 @@ void VideoPlayer::TogglePause() {
 // ── StopPlayback ──────────────────────────────────────────────────────────────
 
 void VideoPlayer::StopPlayback() {
+    {
+        std::lock_guard<std::mutex> lock(video_queue_mutex_);
+        video_queue_.clear();
+        playback_start_us_ = 0;
+        dropped_frames_ = 0;
+    }
     stop_requested_.store(false);
     paused_.store(false);
-    state_       = State::kIdle;
+    reader_done_.store(false);
+    playback_started_.store(false);
+    render_failed_.store(false);
+    state_         = State::kIdle;
     current_title_ = "";
     current_id_    = "";
     stream_url_    = "";
+    error_msg_     = "";
     stream_task_handle_ = nullptr;
+    render_task_handle_ = nullptr;
 
     // Free PSRAM framebuffers if allocated.
     if (frame_buf_a_) { heap_caps_free(frame_buf_a_); frame_buf_a_ = nullptr; }
@@ -301,53 +333,38 @@ void VideoPlayer::UpdateDisplay() {
     // kPlaying: display is the video screen itself — no chat message needed.
 }
 
-// ── VideoStreamTask ───────────────────────────────────────────────────────────
-// FreeRTOS task: opens the .axv HTTP stream, reads binary-framed video (JPEG)
-// and audio (Opus) packets, renders video to LVGL and feeds audio to
-// AudioService. Natural backpressure from PushPacketToDecodeQueue(wait=true)
-// throttles the loop to the audio clock, implicitly pacing video.
+// ── StreamReaderTask ──────────────────────────────────────────────────────────
+// FreeRTOS task: opens the .axv HTTP stream, pushes audio packets into
+// AudioService and enqueues compressed JPEG frames for the render task.
 
-void VideoPlayer::VideoStreamTask(void* arg) {
+void VideoPlayer::StreamReaderTask(void* arg) {
     auto* self = static_cast<VideoPlayer*>(arg);
 
     if (self->stop_requested_.load()) {
-        Application::GetInstance().Schedule([self]() { self->StopPlayback(); });
         self->stream_task_handle_ = nullptr;
+        self->MaybeFinishPlayback();
         vTaskDelete(nullptr);
         return;
     }
 
-    // Allocate PSRAM framebuffers.
-    self->frame_buf_a_ = static_cast<uint8_t*>(
-        heap_caps_malloc(kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    self->frame_buf_b_ = static_cast<uint8_t*>(
-        heap_caps_malloc(kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     uint8_t* jpeg_buf  = static_cast<uint8_t*>(
         heap_caps_malloc(kJpegBufSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 
-    if (!self->frame_buf_a_ || !self->frame_buf_b_ || !jpeg_buf) {
-        ESP_LOGE(TAG, "PSRAM allocation failed");
-        if (self->frame_buf_a_) { heap_caps_free(self->frame_buf_a_); self->frame_buf_a_ = nullptr; }
-        if (self->frame_buf_b_) { heap_caps_free(self->frame_buf_b_); self->frame_buf_b_ = nullptr; }
-        if (jpeg_buf) heap_caps_free(jpeg_buf);
+    if (!jpeg_buf) {
+        ESP_LOGE(TAG, "JPEG buffer allocation failed");
         self->state_ = State::kError;
         self->error_msg_ = "out of memory";
         Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
         self->stream_task_handle_ = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+            self->reader_done_.store(true);
+            self->video_queue_cv_.notify_all();
+        }
+        self->MaybeFinishPlayback();
         vTaskDelete(nullptr);
         return;
     }
-    self->buf_a_is_display_ = true;
-
-    // Create the LVGL video screen now that we're about to start playing.
-    {
-        auto* display = Board::GetInstance().GetDisplay();
-        DisplayLockGuard lock(display);
-        self->CreateVideoScreen();
-        self->state_ = State::kPlaying;
-    }
-
-    ESP_LOGI(TAG, "VideoStreamTask: screen created, video_img_obj_=%p", self->video_img_obj_);
 
     // Disable wake word detection to prevent the video's speaker audio from
     // feeding back through the microphone and triggering state changes that
@@ -364,45 +381,49 @@ void VideoPlayer::VideoStreamTask(void* arg) {
     http->SetHeader("Device-Id",  SystemInfo::GetMacAddress().c_str());
 
     if (!http->Open("GET", self->stream_url_)) {
-        ESP_LOGE(TAG, "VideoStreamTask: HTTP open failed");
+        ESP_LOGE(TAG, "StreamReaderTask: HTTP open failed");
         heap_caps_free(jpeg_buf);
         self->state_ = State::kError;
         self->error_msg_ = "network error";
         Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
-        Application::GetInstance().Schedule([self]() { self->StopPlayback(); });
         self->stream_task_handle_ = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+            self->reader_done_.store(true);
+            self->video_queue_cv_.notify_all();
+        }
+        Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
+        self->MaybeFinishPlayback();
         vTaskDelete(nullptr);
         return;
     }
     if (http->GetStatusCode() != 200) {
         int code = http->GetStatusCode();
         http->Close();
-        ESP_LOGE(TAG, "VideoStreamTask: HTTP %d", code);
+        ESP_LOGE(TAG, "StreamReaderTask: HTTP %d", code);
         heap_caps_free(jpeg_buf);
         self->state_ = State::kError;
         self->error_msg_ = "HTTP " + std::to_string(code);
         Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
-        Application::GetInstance().Schedule([self]() { self->StopPlayback(); });
         self->stream_task_handle_ = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+            self->reader_done_.store(true);
+            self->video_queue_cv_.notify_all();
+        }
+        Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
+        self->MaybeFinishPlayback();
         vTaskDelete(nullptr);
         return;
     }
 
     auto& audio = Application::GetInstance().GetAudioService();
 
-    // lv_image_dsc_t that points to whichever framebuffer is currently decoded.
-    // LVGL 9.x requires header.magic and header.stride to be set explicitly.
-    lv_image_dsc_t frame_dsc = {};
-    frame_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
-    frame_dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
-    frame_dsc.header.w      = (uint16_t)kFrameW;
-    frame_dsc.header.h      = (uint16_t)kFrameH;
-    frame_dsc.header.stride = (uint16_t)(kFrameW * 2); // bytes per row for RGB565
-    frame_dsc.data_size     = kFrameBytes;
-
     // Binary frame header: 4× uint32_t big-endian.
     uint8_t hdr[16];
-    size_t  total_frames = 0;
+    size_t  queued_frames = 0;
+    size_t  audio_packets_buffered = 0;
+    bool    playback_anchor_set = false;
 
     while (!self->stop_requested_.load()) {
         // Soft-pause: stall without closing the HTTP connection.
@@ -427,7 +448,8 @@ void VideoPlayer::VideoStreamTask(void* arg) {
                           ((uint32_t)hdr[6] <<  8) |  (uint32_t)hdr[7];
         uint32_t flen   = ((uint32_t)hdr[8] << 24) | ((uint32_t)hdr[9] << 16) |
                           ((uint32_t)hdr[10]<<  8) |  (uint32_t)hdr[11];
-        // ts_ms at hdr[12..15] (not used on firmware side — backpressure handles sync)
+        uint32_t ts_ms  = ((uint32_t)hdr[12] << 24) | ((uint32_t)hdr[13] << 16) |
+                          ((uint32_t)hdr[14]<<  8) |  (uint32_t)hdr[15];
 
         if (magic != kFrameMagic) {
             ESP_LOGE(TAG, "Frame sync lost (magic=0x%08" PRIx32 ")", magic);
@@ -448,44 +470,42 @@ void VideoPlayer::VideoStreamTask(void* arg) {
         if (self->stop_requested_.load()) break;
 
         if (ftype == kFrameVideo) {
-            // Determine which buffer to decode into (the one NOT on display).
-            uint8_t* decode_buf = self->buf_a_is_display_ ? self->frame_buf_b_ : self->frame_buf_a_;
+            auto frame = std::make_unique<QueuedVideoFrame>();
+            frame->ts_ms = ts_ms;
+            frame->jpeg.assign(jpeg_buf, jpeg_buf + flen);
 
-            uint8_t* decoded   = nullptr;
-            size_t   dec_len   = 0, w = 0, h = 0, stride = 0;
-            esp_err_t ret = jpeg_to_image(jpeg_buf, (size_t)flen,
-                                          &decoded, &dec_len, &w, &h, &stride);
-            if (ret == ESP_OK && decoded && dec_len <= kFrameBytes) {
-                if (total_frames == 0) {
-                    ESP_LOGI(TAG, "First frame decoded: %zux%zu stride=%zu dec_len=%zu", w, h, stride, dec_len);
+            {
+                std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+                if (self->video_queue_.size() >= kMaxQueuedVideoFrames) {
+                    self->video_queue_.pop_front();
+                    self->dropped_frames_++;
                 }
-                memcpy(decode_buf, decoded, dec_len);
-                heap_caps_free(decoded);
-
-                // Swap display buffer under LVGL lock.
-                auto* display = Board::GetInstance().GetDisplay();
-                DisplayLockGuard lock(display);
-                if (self->video_img_obj_) {
-                    self->buf_a_is_display_ = !self->buf_a_is_display_;
-                    frame_dsc.data = decode_buf;
-                    lv_image_set_src(static_cast<lv_obj_t*>(self->video_img_obj_), &frame_dsc);
-                    lv_obj_invalidate(static_cast<lv_obj_t*>(self->video_img_obj_));
-                }
-            } else {
-                if (decoded) heap_caps_free(decoded);
-                ESP_LOGE(TAG, "JPEG decode FAILED frame %zu: ret=%d flen=%" PRIu32 " dec_len=%zu",
-                         total_frames, ret, flen, dec_len);
+                self->video_queue_.push_back(std::move(frame));
+                self->video_queue_cv_.notify_all();
             }
-            total_frames++;
-
+            queued_frames++;
         } else if (ftype == kFrameAudio) {
-            // Push Opus packet to the audio decode queue.
-            // wait=true provides backpressure that paces the whole loop.
             auto packet = std::make_unique<AudioStreamPacket>();
             packet->sample_rate    = 24000;
             packet->frame_duration = 60;
-            packet->payload.assign(jpeg_buf, jpeg_buf + flen);  // reuse jpeg_buf for both types
+            packet->timestamp      = ts_ms;
+            packet->payload.assign(jpeg_buf, jpeg_buf + flen);
             audio.PushPacketToDecodeQueue(std::move(packet), true);
+
+            {
+                std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+                if (!playback_anchor_set) {
+                    self->playback_start_us_ = esp_timer_get_time() - (static_cast<int64_t>(ts_ms) * 1000);
+                    playback_anchor_set = true;
+                }
+                if (!self->playback_started_.load()) {
+                    audio_packets_buffered++;
+                    if (audio_packets_buffered >= kAudioPrebufferPackets) {
+                        self->playback_started_.store(true);
+                        self->video_queue_cv_.notify_all();
+                    }
+                }
+            }
         } else {
             ESP_LOGW(TAG, "Unknown frame type %" PRIu32 ", skipping", ftype);
         }
@@ -495,13 +515,156 @@ stream_done:
     http->Close();
     heap_caps_free(jpeg_buf);
 
-    ESP_LOGI(TAG, "VideoStreamTask: %zu frames rendered (stopped=%d)",
-             total_frames, (int)self->stop_requested_.load());
+    {
+        std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+        self->reader_done_.store(true);
+        if (!self->playback_started_.load()) {
+            self->playback_started_.store(true);
+        }
+        self->stream_task_handle_ = nullptr;
+        self->video_queue_cv_.notify_all();
+    }
+    ESP_LOGI(TAG, "StreamReaderTask: queued=%zu dropped=%zu stopped=%d",
+             queued_frames, self->dropped_frames_, (int)self->stop_requested_.load());
+    self->MaybeFinishPlayback();
+    vTaskDelete(nullptr);
+}
+
+// ── VideoRenderTask ───────────────────────────────────────────────────────────
+// FreeRTOS task: waits for playback to be primed, then decodes queued JPEGs and
+// uses the frame timestamps to drop late frames instead of blocking audio.
+
+void VideoPlayer::VideoRenderTask(void* arg) {
+    auto* self = static_cast<VideoPlayer*>(arg);
+
+    self->frame_buf_a_ = static_cast<uint8_t*>(
+        heap_caps_malloc(kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    self->frame_buf_b_ = static_cast<uint8_t*>(
+        heap_caps_malloc(kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!self->frame_buf_a_ || !self->frame_buf_b_) {
+        ESP_LOGE(TAG, "Render buffers allocation failed");
+        if (self->frame_buf_a_) { heap_caps_free(self->frame_buf_a_); self->frame_buf_a_ = nullptr; }
+        if (self->frame_buf_b_) { heap_caps_free(self->frame_buf_b_); self->frame_buf_b_ = nullptr; }
+        self->state_ = State::kError;
+        self->error_msg_ = "out of memory";
+        self->render_task_handle_ = nullptr;
+        self->render_failed_.store(true);
+        Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
+        self->MaybeFinishPlayback();
+        vTaskDelete(nullptr);
+        return;
+    }
+    self->buf_a_is_display_ = true;
+
+    lv_image_dsc_t frame_dsc = {};
+    frame_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
+    frame_dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
+    frame_dsc.header.w      = (uint16_t)kFrameW;
+    frame_dsc.header.h      = (uint16_t)kFrameH;
+    frame_dsc.header.stride = (uint16_t)(kFrameW * 2);
+    frame_dsc.data_size     = kFrameBytes;
+
+    bool screen_created = false;
+    int64_t playback_base_us = 0;
+    size_t rendered_frames = 0;
+
+    while (!self->stop_requested_.load()) {
+        while (self->paused_.load() && !self->stop_requested_.load()) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        if (self->stop_requested_.load()) {
+            break;
+        }
+
+        std::unique_ptr<QueuedVideoFrame> frame;
+        {
+            std::unique_lock<std::mutex> lock(self->video_queue_mutex_);
+            self->video_queue_cv_.wait(lock, [self]() {
+                return self->stop_requested_.load() ||
+                       (self->playback_started_.load() && !self->video_queue_.empty()) ||
+                       self->reader_done_.load();
+            });
+
+            if (self->stop_requested_.load()) {
+                break;
+            }
+            if (!self->playback_started_.load()) {
+                continue;
+            }
+            if (playback_base_us == 0) {
+                playback_base_us = self->playback_start_us_;
+            }
+            if (self->video_queue_.empty()) {
+                if (self->reader_done_.load()) {
+                    break;
+                }
+                continue;
+            }
+            frame = std::move(self->video_queue_.front());
+            self->video_queue_.pop_front();
+        }
+
+        if (!screen_created) {
+            auto* display = Board::GetInstance().GetDisplay();
+            DisplayLockGuard lock(display);
+            self->CreateVideoScreen();
+            self->state_ = State::kPlaying;
+            screen_created = true;
+        }
+
+        int64_t target_us = playback_base_us + (static_cast<int64_t>(frame->ts_ms) * 1000);
+        int64_t now_us = esp_timer_get_time();
+        if (target_us + kLateFrameDropUs < now_us) {
+            self->dropped_frames_++;
+            continue;
+        }
+        if (target_us > now_us) {
+            int64_t sleep_us = target_us - now_us;
+            vTaskDelay(pdMS_TO_TICKS((sleep_us + 999) / 1000));
+        }
+
+        uint8_t* decode_buf = self->buf_a_is_display_ ? self->frame_buf_b_ : self->frame_buf_a_;
+        uint8_t* decoded = nullptr;
+        size_t dec_len = 0;
+        size_t w = 0;
+        size_t h = 0;
+        size_t stride = 0;
+        esp_err_t ret = jpeg_to_image(frame->jpeg.data(), frame->jpeg.size(),
+                                      &decoded, &dec_len, &w, &h, &stride);
+        if (ret != ESP_OK || decoded == nullptr || dec_len > kFrameBytes) {
+            if (decoded) {
+                heap_caps_free(decoded);
+            }
+            ESP_LOGE(TAG, "JPEG decode FAILED frame %zu: ret=%d flen=%zu dec_len=%zu",
+                     rendered_frames, ret, frame->jpeg.size(), dec_len);
+            continue;
+        }
+
+        memcpy(decode_buf, decoded, dec_len);
+        heap_caps_free(decoded);
+
+        auto* display = Board::GetInstance().GetDisplay();
+        DisplayLockGuard lock(display);
+        if (self->video_img_obj_) {
+            self->buf_a_is_display_ = !self->buf_a_is_display_;
+            frame_dsc.data = decode_buf;
+            lv_image_set_src(static_cast<lv_obj_t*>(self->video_img_obj_), &frame_dsc);
+            lv_obj_invalidate(static_cast<lv_obj_t*>(self->video_img_obj_));
+            rendered_frames++;
+        }
+    }
+
+    ESP_LOGI(TAG, "VideoRenderTask: rendered=%zu dropped=%zu stopped=%d",
+             rendered_frames, self->dropped_frames_, (int)self->stop_requested_.load());
 
     // Re-enable wake word detection that was suppressed during video playback.
     Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
 
-    Application::GetInstance().Schedule([self]() { self->StopPlayback(); });
-    self->stream_task_handle_ = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+        self->render_task_handle_ = nullptr;
+        self->video_queue_cv_.notify_all();
+    }
+    self->MaybeFinishPlayback();
     vTaskDelete(nullptr);
 }
