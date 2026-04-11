@@ -16,7 +16,6 @@
 #include <esp_heap_caps.h>
 #include <cJSON.h>
 #include <algorithm>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -601,10 +600,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
         http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
         if (offset > 0) {
-            char range_header[64];
-            std::snprintf(range_header, sizeof(range_header), "bytes=%lld-",
-                          static_cast<long long>(offset));
-            http->SetHeader("Range", range_header);
+            http->SetHeader("Range", "bytes=" + std::to_string(offset) + "-");
         }
 
         int64_t http_open_start_us = esp_timer_get_time();
