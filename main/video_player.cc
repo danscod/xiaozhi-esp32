@@ -21,6 +21,18 @@
 
 #define TAG "VideoPlayer"
 
+namespace {
+
+TickType_t DelayTicksForUs(int64_t delay_us) {
+    if (delay_us <= 0) {
+        return 0;
+    }
+    TickType_t ticks = pdMS_TO_TICKS(static_cast<uint32_t>((delay_us + 999) / 1000));
+    return ticks > 0 ? ticks : 1;
+}
+
+}  // namespace
+
 // ── Singleton ─────────────────────────────────────────────────────────────────
 
 VideoPlayer& VideoPlayer::GetInstance() {
@@ -69,6 +81,8 @@ VideoPlaybackTelemetry VideoPlayer::BuildTelemetrySnapshot(int duration_ms,
     telemetry.max_audio_push_block_ms = static_cast<int>(playback_stats_.max_audio_push_block_us / 1000);
     telemetry.max_audio_push_ms = static_cast<int>(playback_stats_.max_audio_push_us / 1000);
     telemetry.max_audio_packet_copy_ms = static_cast<int>(playback_stats_.max_audio_packet_copy_us / 1000);
+    telemetry.max_audio_output_write_ms =
+        static_cast<int>(playback_stats_.max_audio_output_write_us / 1000);
     telemetry.max_video_frame_copy_ms = static_cast<int>(playback_stats_.max_video_frame_copy_us / 1000);
     telemetry.max_render_queue_wait_ms = static_cast<int>(playback_stats_.max_render_queue_wait_us / 1000);
     telemetry.max_render_schedule_sleep_ms =
@@ -104,6 +118,8 @@ VideoPlaybackTelemetry VideoPlayer::BuildTelemetrySnapshot(int duration_ms,
     telemetry.header_read_time_us_total = playback_stats_.header_read_time_us_total;
     telemetry.payload_read_time_us_total = playback_stats_.payload_read_time_us_total;
     telemetry.audio_packet_copy_time_us_total = playback_stats_.audio_packet_copy_time_us_total;
+    telemetry.audio_output_samples_written = playback_stats_.audio_output_samples_written;
+    telemetry.audio_output_write_time_us_total = playback_stats_.audio_output_write_time_us_total;
     telemetry.video_frame_copy_time_us_total = playback_stats_.video_frame_copy_time_us_total;
     telemetry.audio_push_time_us_total = playback_stats_.audio_push_time_us_total;
     telemetry.render_queue_wait_us_total = playback_stats_.render_queue_wait_us_total;
@@ -113,6 +129,22 @@ VideoPlaybackTelemetry VideoPlayer::BuildTelemetrySnapshot(int duration_ms,
     telemetry.total_frame_age_after_present_us = playback_stats_.total_frame_age_after_present_us;
     telemetry.jpeg_decode_time_us_total = playback_stats_.jpeg_decode_time_us_total;
     telemetry.frame_present_time_us_total = playback_stats_.frame_present_time_us_total;
+    telemetry.audio_output_calls = static_cast<int>(playback_stats_.audio_output_calls);
+    telemetry.audio_output_underrun_count =
+        static_cast<int>(playback_stats_.audio_output_underrun_count);
+
+    auto audio_metrics = Application::GetInstance().GetAudioService().GetPlaybackMetrics();
+    telemetry.max_audio_output_write_ms =
+        std::max(telemetry.max_audio_output_write_ms, audio_metrics.max_output_write_ms);
+    telemetry.audio_output_samples_written =
+        std::max<int64_t>(telemetry.audio_output_samples_written, audio_metrics.output_samples_written);
+    telemetry.audio_output_write_time_us_total =
+        std::max<int64_t>(telemetry.audio_output_write_time_us_total,
+                          audio_metrics.output_write_time_us_total);
+    telemetry.audio_output_calls =
+        std::max(telemetry.audio_output_calls, audio_metrics.output_calls);
+    telemetry.audio_output_underrun_count =
+        std::max(telemetry.audio_output_underrun_count, audio_metrics.output_underrun_count);
     return telemetry;
 }
 
@@ -367,19 +399,53 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
 
     auto* title_j = cJSON_GetObjectItem(root, "title");
     auto* url_j   = cJSON_GetObjectItem(root, "url");
+    auto* playback_mode_j = cJSON_GetObjectItem(root, "playback_mode");
+    auto* sync_frame_url_j = cJSON_GetObjectItem(root, "sync_frame_url");
+    auto* sync_audio_url_j = cJSON_GetObjectItem(root, "sync_audio_url");
+    auto* duration_s_j = cJSON_GetObjectItem(root, "duration_s");
+    auto* sync_audio_packet_ms_j = cJSON_GetObjectItem(root, "sync_audio_packet_ms");
+    auto* sync_audio_batch_packets_j = cJSON_GetObjectItem(root, "sync_audio_batch_packets");
+    auto* sync_frame_lead_ms_j = cJSON_GetObjectItem(root, "sync_frame_lead_ms");
     if (!cJSON_IsString(title_j) || !cJSON_IsString(url_j)) {
         cJSON_Delete(root);
         return "Error: item metadata incomplete.";
     }
     std::string saved_title = title_j->valuestring;
     std::string saved_url   = url_j->valuestring;
+    bool use_sync_media_api =
+        cJSON_IsString(playback_mode_j) &&
+        std::string(playback_mode_j->valuestring) == "sync_v1" &&
+        cJSON_IsString(sync_frame_url_j) &&
+        cJSON_IsString(sync_audio_url_j);
+    std::string saved_sync_frame_url = use_sync_media_api ? sync_frame_url_j->valuestring : "";
+    std::string saved_sync_audio_url = use_sync_media_api ? sync_audio_url_j->valuestring : "";
+    int saved_duration_ms =
+        cJSON_IsNumber(duration_s_j) ? static_cast<int>(duration_s_j->valuedouble * 1000.0) : 0;
+    int saved_sync_audio_packet_ms =
+        cJSON_IsNumber(sync_audio_packet_ms_j) ? sync_audio_packet_ms_j->valueint : 60;
+    int saved_sync_audio_batch_packets =
+        cJSON_IsNumber(sync_audio_batch_packets_j) ? sync_audio_batch_packets_j->valueint : 96;
+    int saved_sync_frame_lead_ms =
+        cJSON_IsNumber(sync_frame_lead_ms_j) ? sync_frame_lead_ms_j->valueint : 20;
     cJSON_Delete(root);
 
     current_title_ = saved_title;
     stream_url_    = saved_url;
     current_id_    = item_id;
+    sync_frame_url_ = saved_sync_frame_url;
+    sync_audio_url_ = saved_sync_audio_url;
+    use_sync_media_api_ = use_sync_media_api;
+    current_duration_ms_ = saved_duration_ms;
+    sync_audio_packet_ms_ = saved_sync_audio_packet_ms;
+    sync_audio_batch_packets_ = saved_sync_audio_batch_packets;
+    sync_frame_lead_ms_ = saved_sync_frame_lead_ms;
 
-    Application::GetInstance().Schedule([this, saved_url, saved_title, item_id]() {
+    Application::GetInstance().Schedule([this, saved_url, saved_title, item_id,
+                                         use_sync_media_api, saved_sync_frame_url,
+                                         saved_sync_audio_url, saved_duration_ms,
+                                         saved_sync_audio_packet_ms,
+                                         saved_sync_audio_batch_packets,
+                                         saved_sync_frame_lead_ms]() {
         // Stop any conflicting players.
         MediaPlayer::GetInstance().Stop();
         FlappyBird::GetInstance().Stop();
@@ -389,6 +455,13 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
         current_title_ = saved_title;
         current_id_    = item_id;
         stream_url_    = saved_url;
+        sync_frame_url_ = saved_sync_frame_url;
+        sync_audio_url_ = saved_sync_audio_url;
+        use_sync_media_api_ = use_sync_media_api;
+        current_duration_ms_ = saved_duration_ms;
+        sync_audio_packet_ms_ = saved_sync_audio_packet_ms;
+        sync_audio_batch_packets_ = saved_sync_audio_batch_packets;
+        sync_frame_lead_ms_ = saved_sync_frame_lead_ms;
         reader_done_.store(false);
         playback_started_.store(false);
         render_failed_.store(false);
@@ -406,10 +479,42 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
         UpdateDisplay();
         Application::GetInstance().EndVoiceSessionForMedia();
 
-        xTaskCreate(StreamReaderTask, "video_stream", 20480, this, 4,
-                    &stream_task_handle_);
-        xTaskCreate(VideoRenderTask, "video_render", 20480, this, 2,
-                    &render_task_handle_);
+        stream_task_handle_ = nullptr;
+        render_task_handle_ = nullptr;
+
+        BaseType_t stream_task_ok = xTaskCreate(StreamReaderTask, "video_stream",
+                                                kStreamTaskStackWords, this, 4,
+                                                &stream_task_handle_);
+        if (stream_task_ok != pdPASS || stream_task_handle_ == nullptr) {
+            ESP_LOGE(TAG, "Failed to create video stream task");
+            state_ = State::kError;
+            error_msg_ = "stream task create failed";
+            SetPlaybackEndReason("stream_task_create_failed");
+            reader_done_.store(true);
+            playback_started_.store(true);
+            video_queue_cv_.notify_all();
+            UpdateDisplay();
+            MaybeFinishPlayback();
+            return;
+        }
+
+        if (!use_sync_media_api_) {
+            BaseType_t render_task_ok = xTaskCreate(VideoRenderTask, "video_render",
+                                                    kRenderTaskStackWords, this, 2,
+                                                    &render_task_handle_);
+            if (render_task_ok != pdPASS || render_task_handle_ == nullptr) {
+                ESP_LOGE(TAG, "Failed to create video render task");
+                state_ = State::kError;
+                error_msg_ = "render task create failed";
+                SetPlaybackEndReason("render_task_create_failed");
+                stop_requested_.store(true);
+                reader_done_.store(true);
+                playback_started_.store(true);
+                video_queue_cv_.notify_all();
+                UpdateDisplay();
+                return;
+            }
+        }
     });
 
     return std::string("");
@@ -461,6 +566,13 @@ void VideoPlayer::StopPlayback() {
     current_title_ = "";
     current_id_    = "";
     stream_url_    = "";
+    sync_frame_url_ = "";
+    sync_audio_url_ = "";
+    use_sync_media_api_ = false;
+    current_duration_ms_ = 0;
+    sync_audio_packet_ms_ = 60;
+    sync_audio_batch_packets_ = 96;
+    sync_frame_lead_ms_ = 20;
     error_msg_     = "";
     stream_task_handle_ = nullptr;
     render_task_handle_ = nullptr;
@@ -548,6 +660,608 @@ void VideoPlayer::StreamReaderTask(void* arg) {
 
     if (self->stop_requested_.load()) {
         self->stream_task_handle_ = nullptr;
+        self->MaybeFinishPlayback();
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    if (self->use_sync_media_api_) {
+        auto& audio = Application::GetInstance().GetAudioService();
+
+        // Disable wake word detection to prevent speaker audio from
+        // feeding back through the microphone and resetting decode state.
+        audio.EnableWakeWordDetection(false);
+
+        ESP_LOGI(TAG, "Streaming video via sync API: frame=%s audio=%s",
+                 self->sync_frame_url_.c_str(), self->sync_audio_url_.c_str());
+
+        auto& board = Board::GetInstance();
+        auto network = board.GetNetwork();
+        constexpr int kSyncFrameIntervalMs = 125;
+        constexpr int kSyncLoopDelayMs = 10;
+        constexpr int kSyncStartupSettleDelayMs = 200;
+        constexpr int kSyncTargetBufferedBatches = 2;
+        constexpr int kSyncStartupPrebufferPackets = 24;
+
+        size_t queued_frames = 0;
+        size_t audio_packets_buffered = 0;
+        uint32_t next_audio_ts_ms = 0;
+        int64_t last_requested_frame_bucket_ms = -1;
+        int64_t last_enqueued_frame_ts_ms = -1;
+        int64_t last_sync_activity_us = esp_timer_get_time();
+        std::string sync_failure_reason = "sync_audio_fetch_failed";
+        bool audio_finished = false;
+        bool fatal_error = false;
+
+        auto record_http_open = [&](int64_t elapsed_us) {
+            std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+            if (self->playback_stats_.http_open_time_us == 0) {
+                self->playback_stats_.http_open_time_us = elapsed_us;
+            }
+            if (elapsed_us >= kHttpReadStallWarnUs) {
+                self->playback_stats_.http_read_stalls++;
+                self->playback_stats_.max_http_read_stall_us =
+                    std::max(self->playback_stats_.max_http_read_stall_us, elapsed_us);
+            }
+        };
+
+        auto fetch_binary = [&](const std::string& url,
+                                std::vector<uint8_t>& body,
+                                std::string* frame_ts_header) -> bool {
+            constexpr int kSyncHttpTimeoutMs = 6000;
+            constexpr int kSyncHttpMaxAttempts = 2;
+
+            for (int attempt = 1; attempt <= kSyncHttpMaxAttempts; ++attempt) {
+                auto http = network->CreateHttp(0);
+                http->SetTimeout(kSyncHttpTimeoutMs);
+                http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
+                http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+                http->SetHeader("Connection", "close");
+                http->SetHeader("Cache-Control", "no-cache");
+
+                int64_t http_open_start_us = esp_timer_get_time();
+                bool opened = http->Open("GET", url);
+                int64_t http_open_elapsed_us = esp_timer_get_time() - http_open_start_us;
+                record_http_open(http_open_elapsed_us);
+                if (!opened) {
+                    ESP_LOGE(TAG, "Sync API HTTP open failed (attempt %d/%d): %s err=%d",
+                             attempt, kSyncHttpMaxAttempts, url.c_str(), http->GetLastError());
+                    sync_failure_reason = "sync_http_open_failed";
+                    {
+                        std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+                        self->playback_stats_.http_status_code = -1;
+                    }
+                    http->Close();
+                    if (attempt < kSyncHttpMaxAttempts && !self->stop_requested_.load()) {
+                        vTaskDelay(pdMS_TO_TICKS(40));
+                        continue;
+                    }
+                    return false;
+                }
+
+                int status_code = http->GetStatusCode();
+                {
+                    std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+                    self->playback_stats_.http_status_code = status_code;
+                }
+                if (status_code != 200 && status_code != 204) {
+                    ESP_LOGE(TAG, "Sync API HTTP %d (attempt %d/%d) for %s err=%d",
+                             status_code, attempt, kSyncHttpMaxAttempts, url.c_str(),
+                             http->GetLastError());
+                    sync_failure_reason = status_code < 0
+                        ? "sync_http_status_invalid"
+                        : "sync_http_status_unexpected";
+                    http->Close();
+                    if (attempt < kSyncHttpMaxAttempts && status_code < 0 &&
+                        !self->stop_requested_.load()) {
+                        vTaskDelay(pdMS_TO_TICKS(40));
+                        continue;
+                    }
+                    return false;
+                }
+
+                if (frame_ts_header != nullptr) {
+                    *frame_ts_header = http->GetResponseHeader("X-Frame-Timestamp-Ms");
+                }
+                size_t expected_length = http->GetBodyLength();
+                body.clear();
+                if (expected_length > 0) {
+                    body.reserve(expected_length);
+                }
+
+                char read_buf[1024];
+                bool read_failed = false;
+                while (!self->stop_requested_.load()) {
+                    int64_t read_start_us = esp_timer_get_time();
+                    int n = http->Read(read_buf, sizeof(read_buf));
+                    int64_t read_elapsed_us = esp_timer_get_time() - read_start_us;
+                    {
+                        std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+                        self->playback_stats_.http_read_calls++;
+                        self->playback_stats_.http_payload_read_calls++;
+                        self->playback_stats_.payload_read_time_us_total += read_elapsed_us;
+                        self->playback_stats_.http_read_time_us_total += read_elapsed_us;
+                        self->playback_stats_.max_http_read_us =
+                            std::max(self->playback_stats_.max_http_read_us, read_elapsed_us);
+                        if (read_elapsed_us >= kHttpReadStallWarnUs) {
+                            self->playback_stats_.http_read_stalls++;
+                            self->playback_stats_.max_http_read_stall_us =
+                                std::max(self->playback_stats_.max_http_read_stall_us, read_elapsed_us);
+                        }
+                        if (n > 0) {
+                            self->playback_stats_.http_read_bytes += n;
+                            if (expected_length > 0 &&
+                                n < static_cast<int>(std::min(sizeof(read_buf),
+                                                              expected_length - body.size()))) {
+                                self->playback_stats_.http_read_short_calls++;
+                            }
+                        } else if (n == 0) {
+                            self->playback_stats_.http_zero_reads++;
+                        }
+                    }
+
+                    if (n > 0) {
+                        body.insert(body.end(), read_buf, read_buf + n);
+                        if (expected_length > 0 && body.size() >= expected_length) {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    if (n == 0) {
+                        break;
+                    }
+
+                    if (!body.empty() && expected_length == 0) {
+                        ESP_LOGW(TAG, "Sync API read ended after buffered timeout: %s", url.c_str());
+                        break;
+                    }
+
+                    read_failed = true;
+                    break;
+                }
+
+                http->Close();
+                if (read_failed) {
+                    ESP_LOGE(TAG, "Sync API read failed (attempt %d/%d) for %s after %u bytes err=%d",
+                             attempt, kSyncHttpMaxAttempts, url.c_str(),
+                             static_cast<unsigned>(body.size()), http->GetLastError());
+                    sync_failure_reason = "sync_http_read_failed";
+                    if (attempt < kSyncHttpMaxAttempts && !self->stop_requested_.load()) {
+                        vTaskDelay(pdMS_TO_TICKS(40));
+                        continue;
+                    }
+                    return false;
+                }
+                if (expected_length > 0 && body.size() < expected_length) {
+                    ESP_LOGE(TAG, "Sync API short body (attempt %d/%d) for %s (got=%u expected=%u)",
+                             attempt, kSyncHttpMaxAttempts, url.c_str(),
+                             static_cast<unsigned>(body.size()),
+                             static_cast<unsigned>(expected_length));
+                    sync_failure_reason = "sync_http_short_body";
+                    if (attempt < kSyncHttpMaxAttempts && !self->stop_requested_.load()) {
+                        vTaskDelay(pdMS_TO_TICKS(40));
+                        continue;
+                    }
+                    return false;
+                }
+                if (expected_length > 0 && body.empty()) {
+                    ESP_LOGE(TAG, "Sync API empty body (attempt %d/%d) for %s (expected=%u)",
+                             attempt, kSyncHttpMaxAttempts, url.c_str(),
+                             static_cast<unsigned>(expected_length));
+                    sync_failure_reason = "sync_http_empty_body";
+                    if (attempt < kSyncHttpMaxAttempts && !self->stop_requested_.load()) {
+                        vTaskDelay(pdMS_TO_TICKS(40));
+                        continue;
+                    }
+                    return false;
+                }
+                return true;
+            }
+            return false;
+        };
+
+        auto fetch_audio_batch = [&](uint32_t start_ms) -> bool {
+            std::vector<uint8_t> body;
+            std::string url = self->sync_audio_url_ + "/" + std::to_string(start_ms) + "/" +
+                              std::to_string(self->sync_audio_batch_packets_);
+            if (!fetch_binary(url, body, nullptr)) {
+                if (sync_failure_reason.empty()) {
+                    sync_failure_reason = "sync_audio_fetch_failed";
+                }
+                return false;
+            }
+            if (body.empty()) {
+                audio_finished = true;
+                return true;
+            }
+
+            size_t offset = 0;
+            while (offset + 16 <= body.size()) {
+                uint32_t magic = ((uint32_t)body[offset] << 24) |
+                                 ((uint32_t)body[offset + 1] << 16) |
+                                 ((uint32_t)body[offset + 2] << 8) |
+                                 (uint32_t)body[offset + 3];
+                uint32_t frame_type = ((uint32_t)body[offset + 4] << 24) |
+                                      ((uint32_t)body[offset + 5] << 16) |
+                                      ((uint32_t)body[offset + 6] << 8) |
+                                      (uint32_t)body[offset + 7];
+                uint32_t payload_len = ((uint32_t)body[offset + 8] << 24) |
+                                       ((uint32_t)body[offset + 9] << 16) |
+                                       ((uint32_t)body[offset + 10] << 8) |
+                                       (uint32_t)body[offset + 11];
+                uint32_t ts_ms = ((uint32_t)body[offset + 12] << 24) |
+                                 ((uint32_t)body[offset + 13] << 16) |
+                                 ((uint32_t)body[offset + 14] << 8) |
+                                 (uint32_t)body[offset + 15];
+                offset += 16;
+
+                if (magic != kFrameMagic || frame_type != kFrameAudio ||
+                    offset + payload_len > body.size()) {
+                    ESP_LOGE(TAG, "Malformed sync audio batch");
+                    sync_failure_reason = "sync_audio_batch_malformed";
+                    return false;
+                }
+
+                auto packet = std::make_unique<AudioStreamPacket>();
+                packet->sample_rate = 24000;
+                packet->frame_duration = self->sync_audio_packet_ms_;
+                packet->timestamp = ts_ms;
+                int64_t copy_start_us = esp_timer_get_time();
+                packet->payload.assign(body.begin() + offset, body.begin() + offset + payload_len);
+                int64_t copy_elapsed_us = esp_timer_get_time() - copy_start_us;
+
+                int64_t push_start_us = esp_timer_get_time();
+                bool pushed = audio.PushPacketToDecodeQueue(std::move(packet), false);
+                int64_t push_elapsed_us = esp_timer_get_time() - push_start_us;
+                int64_t now_us = esp_timer_get_time();
+                bool playback_started_now = false;
+                if (!pushed) {
+                    ESP_LOGE(TAG, "Sync audio queue full at ts=%u", ts_ms);
+                    sync_failure_reason = "sync_audio_queue_full";
+                    return false;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+                    if (!self->playback_started_.load()) {
+                        audio_packets_buffered++;
+                        if (audio_packets_buffered >=
+                            static_cast<size_t>(std::max(
+                                kSyncStartupPrebufferPackets,
+                                std::min(self->sync_audio_batch_packets_, 24)))) {
+                            self->playback_started_.store(true);
+                            playback_started_now = true;
+                            self->video_queue_cv_.notify_all();
+                        }
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+                    self->playback_stats_.audio_packets_seen++;
+                    self->playback_stats_.audio_bytes_seen += payload_len;
+                    self->playback_stats_.audio_packet_copy_time_us_total += copy_elapsed_us;
+                    self->playback_stats_.max_audio_packet_copy_us =
+                        std::max(self->playback_stats_.max_audio_packet_copy_us, copy_elapsed_us);
+                    self->playback_stats_.audio_push_time_us_total += push_elapsed_us;
+                    self->playback_stats_.max_audio_push_us =
+                        std::max(self->playback_stats_.max_audio_push_us, push_elapsed_us);
+                    if (push_elapsed_us >= kAudioPushBlockWarnUs) {
+                        self->playback_stats_.audio_push_block_count++;
+                        self->playback_stats_.max_audio_push_block_us =
+                            std::max(self->playback_stats_.max_audio_push_block_us, push_elapsed_us);
+                    }
+                    if (self->playback_stats_.first_audio_packet_us == 0 &&
+                        self->playback_stats_.start_us > 0) {
+                        self->playback_stats_.first_audio_packet_us =
+                            now_us - self->playback_stats_.start_us;
+                    }
+                    if (playback_started_now &&
+                        self->playback_stats_.playback_started_us == 0 &&
+                        self->playback_stats_.start_us > 0) {
+                        self->playback_stats_.playback_started_us =
+                            now_us - self->playback_stats_.start_us;
+                    }
+                }
+
+                next_audio_ts_ms = ts_ms + self->sync_audio_packet_ms_;
+                offset += payload_len;
+                last_sync_activity_us = now_us;
+            }
+
+            if (offset != body.size()) {
+                sync_failure_reason = "sync_audio_batch_trailing_bytes";
+                return false;
+            }
+            return true;
+        };
+
+        uint8_t* render_buf_a = static_cast<uint8_t*>(
+            heap_caps_aligned_alloc(16, kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        uint8_t* render_buf_b = static_cast<uint8_t*>(
+            heap_caps_aligned_alloc(16, kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!render_buf_a || !render_buf_b) {
+            if (render_buf_a) {
+                heap_caps_free(render_buf_a);
+            }
+            if (render_buf_b) {
+                heap_caps_free(render_buf_b);
+            }
+            ESP_LOGE(TAG, "Sync render buffers allocation failed");
+            self->state_ = State::kError;
+            self->error_msg_ = "out of memory";
+            self->SetPlaybackEndReason("render_buffer_alloc_failed");
+            Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
+            audio.EnableWakeWordDetection(true);
+            self->stream_task_handle_ = nullptr;
+            self->MaybeFinishPlayback();
+            vTaskDelete(nullptr);
+            return;
+        }
+
+        bool screen_created = false;
+        bool buf_a_is_display = true;
+        size_t rendered_frames = 0;
+        int64_t last_rendered_frame_ts_ms = -1;
+
+        lv_image_dsc_t frame_dsc = {};
+        frame_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
+        frame_dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
+        frame_dsc.header.w      = static_cast<uint16_t>(kFrameW);
+        frame_dsc.header.h      = static_cast<uint16_t>(kFrameH);
+        frame_dsc.header.stride = static_cast<uint16_t>(kFrameW * 2);
+        frame_dsc.data_size     = kFrameBytes;
+
+        auto fetch_video_frame = [&](int64_t target_ms,
+                                     uint32_t& frame_ts_ms,
+                                     std::vector<uint8_t>& jpeg) -> bool {
+            std::string frame_ts_header;
+            std::string url = self->sync_frame_url_ + "/" + std::to_string(target_ms);
+            if (!fetch_binary(url, jpeg, &frame_ts_header)) {
+                return false;
+            }
+            if (jpeg.empty()) {
+                return true;
+            }
+
+            frame_ts_ms = static_cast<uint32_t>(std::max<int64_t>(0, target_ms));
+            if (!frame_ts_header.empty()) {
+                frame_ts_ms = static_cast<uint32_t>(std::strtoul(frame_ts_header.c_str(), nullptr, 10));
+            }
+            if (last_rendered_frame_ts_ms == static_cast<int64_t>(frame_ts_ms)) {
+                jpeg.clear();
+                return true;
+            }
+
+            int64_t now_us = esp_timer_get_time();
+            {
+                std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+                self->playback_stats_.video_frames_seen++;
+                self->playback_stats_.video_bytes_seen += jpeg.size();
+                self->playback_stats_.max_queued_video_frames =
+                    std::max(self->playback_stats_.max_queued_video_frames, static_cast<size_t>(1));
+                if (self->playback_stats_.first_video_frame_us == 0 &&
+                    self->playback_stats_.start_us > 0) {
+                    self->playback_stats_.first_video_frame_us =
+                        now_us - self->playback_stats_.start_us;
+                }
+            }
+            queued_frames++;
+            last_sync_activity_us = now_us;
+            return true;
+        };
+
+        auto present_video_frame = [&](uint32_t frame_ts_ms,
+                                       const std::vector<uint8_t>& jpeg,
+                                       int64_t audio_clock_ms) -> bool {
+            if (jpeg.empty()) {
+                return true;
+            }
+
+            if (!screen_created) {
+                auto* display = Board::GetInstance().GetDisplay();
+                DisplayLockGuard lock(display);
+                self->CreateVideoScreen();
+                self->state_ = State::kPlaying;
+                screen_created = true;
+            }
+
+            int64_t frame_timestamp_us = static_cast<int64_t>(frame_ts_ms) * 1000;
+            int64_t age_before_decode_us =
+                std::max<int64_t>(0, (audio_clock_ms * 1000) - frame_timestamp_us);
+            {
+                std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+                self->playback_stats_.video_frames_decode_attempted++;
+                self->playback_stats_.total_frame_age_before_decode_us += age_before_decode_us;
+                self->playback_stats_.max_frame_age_before_decode_us =
+                    std::max(self->playback_stats_.max_frame_age_before_decode_us, age_before_decode_us);
+            }
+
+            uint8_t* decode_buf = buf_a_is_display ? render_buf_b : render_buf_a;
+            size_t dec_len = 0;
+            size_t w = 0;
+            size_t h = 0;
+            size_t stride = 0;
+            int64_t decode_begin_us = esp_timer_get_time();
+            esp_err_t ret = jpeg_to_image_into(jpeg.data(), jpeg.size(),
+                                               decode_buf, kFrameBytes, &dec_len, &w, &h, &stride);
+            int64_t decode_elapsed_us = esp_timer_get_time() - decode_begin_us;
+            {
+                std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+                self->playback_stats_.jpeg_decode_time_us_total += decode_elapsed_us;
+                self->playback_stats_.max_jpeg_decode_us =
+                    std::max(self->playback_stats_.max_jpeg_decode_us, decode_elapsed_us);
+            }
+            if (ret != ESP_OK || dec_len > kFrameBytes || w != kFrameW || h != kFrameH ||
+                stride != (kFrameW * 2)) {
+                ESP_LOGE(TAG, "Sync JPEG decode FAILED: ret=%d flen=%zu dec_len=%zu",
+                         ret, jpeg.size(), dec_len);
+                std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+                self->playback_stats_.video_frames_decode_failed++;
+                sync_failure_reason = "frame_decode_failed";
+                return false;
+            }
+
+            auto* display = Board::GetInstance().GetDisplay();
+            int64_t present_start_us = esp_timer_get_time();
+            bool frame_presented = display->PresentVideoFrameRGB565(decode_buf, dec_len, w, h, stride);
+            if (!frame_presented) {
+                DisplayLockGuard lock(display);
+                if (self->video_img_obj_) {
+                    buf_a_is_display = !buf_a_is_display;
+                    frame_dsc.data = decode_buf;
+                    lv_image_set_src(static_cast<lv_obj_t*>(self->video_img_obj_), &frame_dsc);
+                    lv_obj_invalidate(static_cast<lv_obj_t*>(self->video_img_obj_));
+                    frame_presented = true;
+                }
+            }
+            int64_t present_elapsed_us = esp_timer_get_time() - present_start_us;
+            int64_t presented_at_us = esp_timer_get_time();
+            int64_t audio_after_present_ms = audio.GetPlaybackPositionMs();
+            if (audio_after_present_ms < 0) {
+                audio_after_present_ms = audio_clock_ms;
+            }
+            int64_t age_after_present_us =
+                std::max<int64_t>(0, (audio_after_present_ms * 1000) - frame_timestamp_us);
+
+            if (frame_presented) {
+                rendered_frames++;
+                last_rendered_frame_ts_ms = frame_ts_ms;
+                std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+                self->playback_stats_.frame_present_time_us_total += present_elapsed_us;
+                self->playback_stats_.max_frame_present_us =
+                    std::max(self->playback_stats_.max_frame_present_us, present_elapsed_us);
+                self->playback_stats_.video_frames_presented = rendered_frames;
+                self->playback_stats_.rendered_frames = rendered_frames;
+                self->playback_stats_.total_frame_age_after_present_us += age_after_present_us;
+                self->playback_stats_.max_frame_age_after_present_us =
+                    std::max(self->playback_stats_.max_frame_age_after_present_us, age_after_present_us);
+                if (self->playback_stats_.first_frame_presented_us == 0 &&
+                    self->playback_stats_.start_us > 0) {
+                    self->playback_stats_.first_frame_presented_us =
+                        presented_at_us - self->playback_stats_.start_us;
+                }
+            }
+
+            return true;
+        };
+
+        if (kSyncStartupSettleDelayMs > 0) {
+            vTaskDelay(pdMS_TO_TICKS(kSyncStartupSettleDelayMs));
+        }
+
+        while (!self->stop_requested_.load()) {
+            while (self->paused_.load() && !self->stop_requested_.load()) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+            if (self->stop_requested_.load()) {
+                break;
+            }
+
+            int64_t audio_clock_ms = audio.GetPlaybackPositionMs();
+            int64_t reference_ms = audio_clock_ms >= 0 ? audio_clock_ms : 0;
+            int target_buffered_packets = std::max(
+                kSyncStartupPrebufferPackets,
+                self->sync_audio_batch_packets_ * kSyncTargetBufferedBatches);
+            int64_t desired_audio_buffer_until_ms =
+                reference_ms + static_cast<int64_t>(target_buffered_packets *
+                                                    self->sync_audio_packet_ms_);
+
+            if (!audio_finished && next_audio_ts_ms < desired_audio_buffer_until_ms) {
+                if (!fetch_audio_batch(next_audio_ts_ms)) {
+                    fatal_error = true;
+                    self->SetPlaybackEndReason(sync_failure_reason.c_str());
+                }
+            }
+            if (fatal_error) {
+                break;
+            }
+
+            int64_t frame_clock_ms = audio_clock_ms;
+            if (frame_clock_ms < 0 && self->playback_started_.load() && next_audio_ts_ms > 0) {
+                frame_clock_ms = std::max<int64_t>(
+                    0, static_cast<int64_t>(next_audio_ts_ms) - self->sync_audio_packet_ms_);
+            }
+
+            if (self->playback_started_.load() && frame_clock_ms >= 0) {
+                int64_t request_ms = std::max<int64_t>(0, frame_clock_ms + self->sync_frame_lead_ms_);
+                int64_t request_bucket_ms =
+                    (request_ms / kSyncFrameIntervalMs) * kSyncFrameIntervalMs;
+                if (request_bucket_ms != last_requested_frame_bucket_ms &&
+                    (self->current_duration_ms_ <= 0 || request_bucket_ms <= self->current_duration_ms_)) {
+                    std::vector<uint8_t> frame_jpeg;
+                    uint32_t frame_ts_ms = 0;
+                    if (!fetch_video_frame(request_ms, frame_ts_ms, frame_jpeg)) {
+                        fatal_error = true;
+                        self->SetPlaybackEndReason(sync_failure_reason.c_str());
+                        break;
+                    }
+                    last_requested_frame_bucket_ms = request_bucket_ms;
+                    if (!frame_jpeg.empty() &&
+                        !present_video_frame(frame_ts_ms, frame_jpeg, frame_clock_ms)) {
+                        fatal_error = true;
+                        self->SetPlaybackEndReason(sync_failure_reason.c_str());
+                        break;
+                    }
+                }
+            }
+
+            if (audio_finished && self->playback_started_.load()) {
+                int64_t finished_at_ms = self->current_duration_ms_ > 0
+                    ? self->current_duration_ms_
+                    : static_cast<int64_t>(next_audio_ts_ms);
+                if (audio_clock_ms >= finished_at_ms - self->sync_audio_packet_ms_) {
+                    break;
+                }
+            }
+
+            if (self->playback_started_.load() &&
+                (audio_clock_ms >= 0 || last_enqueued_frame_ts_ms >= 0)) {
+                self->MaybePostPlaybackProgress();
+            }
+            if (self->playback_started_.load() &&
+                last_requested_frame_bucket_ms < 0 &&
+                (esp_timer_get_time() - last_sync_activity_us) > 2000000) {
+                fatal_error = true;
+                self->SetPlaybackEndReason("sync_start_stalled");
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(kSyncLoopDelayMs));
+        }
+
+        if (screen_created) {
+            Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
+        }
+        heap_caps_free(render_buf_a);
+        heap_caps_free(render_buf_b);
+        if (!self->stop_requested_.load()) {
+            std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+            if (self->playback_end_reason_.empty() || self->playback_end_reason_ == "in_progress") {
+                self->playback_end_reason_ = fatal_error ? "sync_api_failed" : "stream_read_ended";
+            }
+        }
+
+        audio.EnableWakeWordDetection(true);
+        {
+            std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+            self->reader_done_.store(true);
+            if (!self->playback_started_.load()) {
+                self->playback_started_.store(true);
+            }
+            self->stream_task_handle_ = nullptr;
+            self->video_queue_cv_.notify_all();
+        }
+        ESP_LOGI(TAG, "SyncMediaTask: rendered=%zu fetched=%zu stopped=%d",
+                 rendered_frames, queued_frames, (int)self->stop_requested_.load());
+        {
+            std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+            self->playback_stats_.dropped_frames = self->dropped_frames_;
+        }
+        if (fatal_error && self->state_ != State::kError) {
+            self->state_ = State::kError;
+            self->error_msg_ = "network error";
+            Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
+        }
         self->MaybeFinishPlayback();
         vTaskDelete(nullptr);
         return;
@@ -964,6 +1678,7 @@ void VideoPlayer::VideoRenderTask(void* arg) {
         return;
     }
     self->buf_a_is_display_ = true;
+    auto& audio_service = Application::GetInstance().GetAudioService();
 
     lv_image_dsc_t frame_dsc = {};
     frame_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
@@ -974,7 +1689,6 @@ void VideoPlayer::VideoRenderTask(void* arg) {
     frame_dsc.data_size     = kFrameBytes;
 
     bool screen_created = false;
-    int64_t playback_base_us = 0;
     size_t rendered_frames = 0;
 
     while (!self->stop_requested_.load()) {
@@ -988,7 +1702,8 @@ void VideoPlayer::VideoRenderTask(void* arg) {
         std::unique_ptr<QueuedVideoFrame> frame;
         int backlog_drops = 0;
         int64_t future_wait_us = 0;
-        int64_t target_us = 0;
+        int64_t frame_timestamp_us = 0;
+        int64_t audio_clock_ms = -1;
         {
             std::unique_lock<std::mutex> lock(self->video_queue_mutex_);
             int64_t wait_start_us = esp_timer_get_time();
@@ -1012,9 +1727,6 @@ void VideoPlayer::VideoRenderTask(void* arg) {
             if (!self->playback_started_.load()) {
                 continue;
             }
-            if (playback_base_us == 0) {
-                playback_base_us = self->playback_start_us_;
-            }
             if (self->video_queue_.empty()) {
                 {
                     std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
@@ -1026,11 +1738,16 @@ void VideoPlayer::VideoRenderTask(void* arg) {
                 continue;
             }
 
-            int64_t now_us_locked = esp_timer_get_time();
+            audio_clock_ms = audio_service.GetPlaybackPositionMs();
+            if (audio_clock_ms < 0) {
+                future_wait_us = 5000;
+                continue;
+            }
+
             while (!self->video_queue_.empty()) {
-                int64_t front_target_us =
-                    playback_base_us + (static_cast<int64_t>(self->video_queue_.front()->ts_ms) * 1000);
-                if (front_target_us + kLateFrameDropUs < now_us_locked) {
+                int64_t front_timestamp_us =
+                    static_cast<int64_t>(self->video_queue_.front()->ts_ms) * 1000;
+                if (front_timestamp_us + kLateFrameDropUs < (audio_clock_ms * 1000)) {
                     self->video_queue_.pop_front();
                     backlog_drops++;
                     self->dropped_frames_++;
@@ -1053,9 +1770,9 @@ void VideoPlayer::VideoRenderTask(void* arg) {
 
             int selected_index = -1;
             for (size_t i = 0; i < self->video_queue_.size(); ++i) {
-                int64_t queued_target_us =
-                    playback_base_us + (static_cast<int64_t>(self->video_queue_[i]->ts_ms) * 1000);
-                if (queued_target_us <= now_us_locked + kFrameSelectionLeadUs) {
+                int64_t queued_timestamp_us =
+                    static_cast<int64_t>(self->video_queue_[i]->ts_ms) * 1000;
+                if (queued_timestamp_us <= (audio_clock_ms * 1000) + kFrameSelectionLeadUs) {
                     selected_index = static_cast<int>(i);
                 } else {
                     break;
@@ -1063,10 +1780,10 @@ void VideoPlayer::VideoRenderTask(void* arg) {
             }
 
             if (selected_index < 0) {
-                int64_t front_target_us =
-                    playback_base_us + (static_cast<int64_t>(self->video_queue_.front()->ts_ms) * 1000);
+                int64_t front_timestamp_us =
+                    static_cast<int64_t>(self->video_queue_.front()->ts_ms) * 1000;
                 future_wait_us = std::max<int64_t>(1000, std::min<int64_t>(
-                    front_target_us - now_us_locked, kFutureFrameRecheckUs));
+                    front_timestamp_us - (audio_clock_ms * 1000), kFutureFrameRecheckUs));
                 if (backlog_drops > 0) {
                     std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
                     self->playback_stats_.render_backlog_drop_count += backlog_drops;
@@ -1087,8 +1804,7 @@ void VideoPlayer::VideoRenderTask(void* arg) {
                 self->video_queue_.pop_front();
                 self->dropped_frames_++;
             }
-            target_us = playback_base_us +
-                (static_cast<int64_t>(self->video_queue_.front()->ts_ms) * 1000);
+            frame_timestamp_us = static_cast<int64_t>(self->video_queue_.front()->ts_ms) * 1000;
             frame = std::move(self->video_queue_.front());
             self->video_queue_.pop_front();
         }
@@ -1098,7 +1814,10 @@ void VideoPlayer::VideoRenderTask(void* arg) {
             self->playback_stats_.dropped_frames = self->dropped_frames_;
         }
         if (future_wait_us > 0) {
-            vTaskDelay(pdMS_TO_TICKS((future_wait_us + 999) / 1000));
+            TickType_t delay_ticks = DelayTicksForUs(future_wait_us);
+            if (delay_ticks > 0) {
+                vTaskDelay(delay_ticks);
+            }
             continue;
         }
 
@@ -1110,29 +1829,7 @@ void VideoPlayer::VideoRenderTask(void* arg) {
             screen_created = true;
         }
 
-        int64_t now_us = esp_timer_get_time();
-        if (target_us > now_us) {
-            int64_t sleep_us = target_us - now_us;
-            {
-                std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
-                self->playback_stats_.render_schedule_sleep_us_total += sleep_us;
-                self->playback_stats_.max_render_schedule_sleep_us =
-                    std::max(self->playback_stats_.max_render_schedule_sleep_us, sleep_us);
-            }
-            vTaskDelay(pdMS_TO_TICKS((sleep_us + 999) / 1000));
-        } else if (target_us + kLateFrameDropUs < now_us) {
-            int64_t late_us = now_us - target_us;
-            std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
-            self->playback_stats_.late_frame_count++;
-            self->playback_stats_.total_frame_late_us += late_us;
-            self->playback_stats_.max_frame_late_us =
-                std::max(self->playback_stats_.max_frame_late_us, late_us);
-            ESP_LOGD(TAG, "Rendering late frame immediately (late=%lld ms)",
-                     (long long)(late_us / 1000));
-        }
-
-        int64_t decode_start_us = esp_timer_get_time();
-        int64_t age_before_decode_us = std::max<int64_t>(0, decode_start_us - target_us);
+        int64_t age_before_decode_us = std::max<int64_t>(0, (audio_clock_ms * 1000) - frame_timestamp_us);
         {
             std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
             self->playback_stats_.video_frames_decode_attempted++;
@@ -1166,22 +1863,26 @@ void VideoPlayer::VideoRenderTask(void* arg) {
 
         auto* display = Board::GetInstance().GetDisplay();
         int64_t present_start_us = esp_timer_get_time();
-        bool frame_presented = false;
-        {
+        bool frame_presented = display->PresentVideoFrameRGB565(decode_buf, dec_len, w, h, stride);
+        if (!frame_presented) {
             DisplayLockGuard lock(display);
             if (self->video_img_obj_) {
                 self->buf_a_is_display_ = !self->buf_a_is_display_;
                 frame_dsc.data = decode_buf;
                 lv_image_set_src(static_cast<lv_obj_t*>(self->video_img_obj_), &frame_dsc);
                 lv_obj_invalidate(static_cast<lv_obj_t*>(self->video_img_obj_));
-                rendered_frames++;
                 frame_presented = true;
             }
         }
         int64_t present_elapsed_us = esp_timer_get_time() - present_start_us;
         int64_t presented_at_us = esp_timer_get_time();
-        int64_t age_after_present_us = std::max<int64_t>(0, presented_at_us - target_us);
+        int64_t audio_after_present_ms = audio_service.GetPlaybackPositionMs();
+        if (audio_after_present_ms < 0) {
+            audio_after_present_ms = audio_clock_ms;
+        }
+        int64_t age_after_present_us = std::max<int64_t>(0, (audio_after_present_ms * 1000) - frame_timestamp_us);
         if (frame_presented) {
+            rendered_frames++;
             std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
             self->playback_stats_.frame_present_time_us_total += present_elapsed_us;
             self->playback_stats_.max_frame_present_us =

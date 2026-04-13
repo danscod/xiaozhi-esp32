@@ -201,6 +201,7 @@ void Telemetry::PostVideoPlaybackStats(const VideoPlaybackTelemetry& telemetry) 
             cJSON_AddNumberToObject(root, "max_audio_push_block_ms", telemetry.max_audio_push_block_ms);
             cJSON_AddNumberToObject(root, "max_audio_push_ms", telemetry.max_audio_push_ms);
             cJSON_AddNumberToObject(root, "max_audio_packet_copy_ms", telemetry.max_audio_packet_copy_ms);
+            cJSON_AddNumberToObject(root, "max_audio_output_write_ms", telemetry.max_audio_output_write_ms);
             cJSON_AddNumberToObject(root, "max_video_frame_copy_ms", telemetry.max_video_frame_copy_ms);
             cJSON_AddNumberToObject(root, "max_render_queue_wait_ms", telemetry.max_render_queue_wait_ms);
             cJSON_AddNumberToObject(root, "max_render_schedule_sleep_ms", telemetry.max_render_schedule_sleep_ms);
@@ -223,6 +224,8 @@ void Telemetry::PostVideoPlaybackStats(const VideoPlaybackTelemetry& telemetry) 
             cJSON_AddNumberToObject(root, "header_read_time_us_total", static_cast<double>(telemetry.header_read_time_us_total));
             cJSON_AddNumberToObject(root, "payload_read_time_us_total", static_cast<double>(telemetry.payload_read_time_us_total));
             cJSON_AddNumberToObject(root, "audio_packet_copy_time_us_total", static_cast<double>(telemetry.audio_packet_copy_time_us_total));
+            cJSON_AddNumberToObject(root, "audio_output_samples_written", static_cast<double>(telemetry.audio_output_samples_written));
+            cJSON_AddNumberToObject(root, "audio_output_write_time_us_total", static_cast<double>(telemetry.audio_output_write_time_us_total));
             cJSON_AddNumberToObject(root, "video_frame_copy_time_us_total", static_cast<double>(telemetry.video_frame_copy_time_us_total));
             cJSON_AddNumberToObject(root, "audio_push_time_us_total", static_cast<double>(telemetry.audio_push_time_us_total));
             cJSON_AddNumberToObject(root, "render_queue_wait_us_total", static_cast<double>(telemetry.render_queue_wait_us_total));
@@ -232,6 +235,8 @@ void Telemetry::PostVideoPlaybackStats(const VideoPlaybackTelemetry& telemetry) 
             cJSON_AddNumberToObject(root, "total_frame_age_after_present_us", static_cast<double>(telemetry.total_frame_age_after_present_us));
             cJSON_AddNumberToObject(root, "jpeg_decode_time_us_total", static_cast<double>(telemetry.jpeg_decode_time_us_total));
             cJSON_AddNumberToObject(root, "frame_present_time_us_total", static_cast<double>(telemetry.frame_present_time_us_total));
+            cJSON_AddNumberToObject(root, "audio_output_calls", telemetry.audio_output_calls);
+            cJSON_AddNumberToObject(root, "audio_output_underrun_count", telemetry.audio_output_underrun_count);
         });
 }
 
@@ -270,6 +275,7 @@ void Telemetry::PostVideoPlaybackProgress(const VideoPlaybackTelemetry& telemetr
             cJSON_AddNumberToObject(root, "max_audio_push_block_ms", telemetry.max_audio_push_block_ms);
             cJSON_AddNumberToObject(root, "max_audio_push_ms", telemetry.max_audio_push_ms);
             cJSON_AddNumberToObject(root, "max_audio_packet_copy_ms", telemetry.max_audio_packet_copy_ms);
+            cJSON_AddNumberToObject(root, "max_audio_output_write_ms", telemetry.max_audio_output_write_ms);
             cJSON_AddNumberToObject(root, "max_video_frame_copy_ms", telemetry.max_video_frame_copy_ms);
             cJSON_AddNumberToObject(root, "max_render_queue_wait_ms", telemetry.max_render_queue_wait_ms);
             cJSON_AddNumberToObject(root, "max_render_schedule_sleep_ms", telemetry.max_render_schedule_sleep_ms);
@@ -292,6 +298,8 @@ void Telemetry::PostVideoPlaybackProgress(const VideoPlaybackTelemetry& telemetr
             cJSON_AddNumberToObject(root, "header_read_time_us_total", static_cast<double>(telemetry.header_read_time_us_total));
             cJSON_AddNumberToObject(root, "payload_read_time_us_total", static_cast<double>(telemetry.payload_read_time_us_total));
             cJSON_AddNumberToObject(root, "audio_packet_copy_time_us_total", static_cast<double>(telemetry.audio_packet_copy_time_us_total));
+            cJSON_AddNumberToObject(root, "audio_output_samples_written", static_cast<double>(telemetry.audio_output_samples_written));
+            cJSON_AddNumberToObject(root, "audio_output_write_time_us_total", static_cast<double>(telemetry.audio_output_write_time_us_total));
             cJSON_AddNumberToObject(root, "video_frame_copy_time_us_total", static_cast<double>(telemetry.video_frame_copy_time_us_total));
             cJSON_AddNumberToObject(root, "audio_push_time_us_total", static_cast<double>(telemetry.audio_push_time_us_total));
             cJSON_AddNumberToObject(root, "render_queue_wait_us_total", static_cast<double>(telemetry.render_queue_wait_us_total));
@@ -301,5 +309,7 @@ void Telemetry::PostVideoPlaybackProgress(const VideoPlaybackTelemetry& telemetr
             cJSON_AddNumberToObject(root, "total_frame_age_after_present_us", static_cast<double>(telemetry.total_frame_age_after_present_us));
             cJSON_AddNumberToObject(root, "jpeg_decode_time_us_total", static_cast<double>(telemetry.jpeg_decode_time_us_total));
             cJSON_AddNumberToObject(root, "frame_present_time_us_total", static_cast<double>(telemetry.frame_present_time_us_total));
+            cJSON_AddNumberToObject(root, "audio_output_calls", telemetry.audio_output_calls);
+            cJSON_AddNumberToObject(root, "audio_output_underrun_count", telemetry.audio_output_underrun_count);
         });
 }

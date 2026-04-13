@@ -40,6 +40,7 @@ struct VideoPlaybackTelemetry {
     int max_audio_push_block_ms = 0;
     int max_audio_push_ms = 0;
     int max_audio_packet_copy_ms = 0;
+    int max_audio_output_write_ms = 0;
     int max_video_frame_copy_ms = 0;
     int max_render_queue_wait_ms = 0;
     int max_render_schedule_sleep_ms = 0;
@@ -63,6 +64,8 @@ struct VideoPlaybackTelemetry {
     int64_t header_read_time_us_total = 0;
     int64_t payload_read_time_us_total = 0;
     int64_t audio_packet_copy_time_us_total = 0;
+    int64_t audio_output_samples_written = 0;
+    int64_t audio_output_write_time_us_total = 0;
     int64_t video_frame_copy_time_us_total = 0;
     int64_t audio_push_time_us_total = 0;
     int64_t render_queue_wait_us_total = 0;
@@ -72,6 +75,8 @@ struct VideoPlaybackTelemetry {
     int64_t total_frame_age_after_present_us = 0;
     int64_t jpeg_decode_time_us_total = 0;
     int64_t frame_present_time_us_total = 0;
+    int audio_output_calls = 0;
+    int audio_output_underrun_count = 0;
 };
 
 /**

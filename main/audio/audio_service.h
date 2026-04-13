@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <mutex>
+#include <atomic>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -38,8 +39,8 @@
 
 #define OPUS_FRAME_DURATION_MS 60
 #define MAX_ENCODE_TASKS_IN_QUEUE 2
-#define MAX_PLAYBACK_TASKS_IN_QUEUE 6
-#define MAX_DECODE_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
+#define MAX_PLAYBACK_TASKS_IN_QUEUE 48
+#define MAX_DECODE_PACKETS_IN_QUEUE (14400 / OPUS_FRAME_DURATION_MS)
 #define MAX_SEND_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
 #define AUDIO_TESTING_MAX_DURATION_MS 10000
 #define MAX_TIMESTAMPS_IN_QUEUE 3
@@ -93,6 +94,15 @@ struct AudioTask {
     AudioTaskType type;
     std::vector<int16_t> pcm;
     uint32_t timestamp;
+    int frame_duration_ms = 0;
+};
+
+struct AudioPlaybackMetricsSnapshot {
+    int output_calls = 0;
+    int max_output_write_ms = 0;
+    int output_underrun_count = 0;
+    int64_t output_samples_written = 0;
+    int64_t output_write_time_us_total = 0;
 };
 
 struct DebugStatistics {
@@ -132,6 +142,8 @@ public:
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
+    int64_t GetPlaybackPositionMs();
+    AudioPlaybackMetricsSnapshot GetPlaybackMetrics() const;
     void SetModelsList(srmodel_list_t* models_list);
 
 private:
@@ -173,6 +185,15 @@ private:
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
+    std::mutex playback_clock_mutex_;
+    int64_t playback_clock_output_start_us_ = 0;
+    int64_t playback_clock_last_completed_ms_ = -1;
+    uint32_t playback_clock_packet_start_ms_ = 0;
+    int playback_clock_packet_duration_ms_ = 0;
+    bool playback_clock_valid_ = false;
+    bool playback_clock_active_ = false;
+    mutable std::mutex playback_metrics_mutex_;
+    AudioPlaybackMetricsSnapshot playback_metrics_;
 
     bool wake_word_initialized_ = false;
     bool audio_processor_initialized_ = false;
@@ -188,6 +209,8 @@ private:
     void AudioOutputTask();
     void OpusCodecTask();
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
+    void ResetPlaybackClockLocked();
+    void ResetPlaybackMetricsLocked();
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckAndUpdateAudioPowerState();
 };

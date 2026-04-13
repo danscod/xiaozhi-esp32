@@ -11,12 +11,18 @@
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
+#include <esp_heap_caps.h>
 #include <cstring>
 #include <src/misc/cache/lv_cache.h>
 
 #include "board.h"
 
 #define TAG "LcdDisplay"
+namespace {
+
+constexpr size_t kDirectVideoChunkLines = 16;
+
+}  // namespace
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
@@ -166,6 +172,13 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
         return;
     }
 
+    video_dma_buffer_pixels_ = width_ * kDirectVideoChunkLines;
+    video_dma_buffer_ = static_cast<uint16_t*>(heap_caps_malloc(
+        video_dma_buffer_pixels_ * sizeof(uint16_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+    if (video_dma_buffer_ == nullptr) {
+        ESP_LOGW(TAG, "Failed to allocate direct video DMA buffer, falling back to LVGL image path");
+    }
+
     if (offset_x != 0 || offset_y != 0) {
         lv_display_set_offset(display_, offset_x, offset_y);
     }
@@ -296,6 +309,10 @@ LcdDisplay::~LcdDisplay() {
         esp_timer_stop(preview_timer_);
         esp_timer_delete(preview_timer_);
     }
+    if (video_dma_buffer_ != nullptr) {
+        heap_caps_free(video_dma_buffer_);
+        video_dma_buffer_ = nullptr;
+    }
 
     if (preview_image_ != nullptr) {
         lv_obj_del(preview_image_);
@@ -348,6 +365,49 @@ bool LcdDisplay::Lock(int timeout_ms) {
 
 void LcdDisplay::Unlock() {
     lvgl_port_unlock();
+}
+
+bool LcdDisplay::PresentVideoFrameRGB565(const uint8_t* data, size_t data_len,
+                                         size_t width, size_t height, size_t stride) {
+    if (panel_ == nullptr || data == nullptr || video_dma_buffer_ == nullptr) {
+        return false;
+    }
+    if (width != static_cast<size_t>(width_) || height != static_cast<size_t>(height_)) {
+        return false;
+    }
+    if (stride != width * sizeof(uint16_t) || data_len < width * height * sizeof(uint16_t)) {
+        return false;
+    }
+
+    if (pm_lock_ != nullptr) {
+        esp_pm_lock_acquire(pm_lock_);
+    }
+    DisplayLockGuard lock(this);
+
+    const uint16_t* src = reinterpret_cast<const uint16_t*>(data);
+    for (size_t y = 0; y < height; y += kDirectVideoChunkLines) {
+        size_t lines = std::min(kDirectVideoChunkLines, height - y);
+        size_t pixels = width * lines;
+        size_t row_offset = y * width;
+        for (size_t i = 0; i < pixels; ++i) {
+            video_dma_buffer_[i] = __builtin_bswap16(src[row_offset + i]);
+        }
+        esp_err_t err = esp_lcd_panel_draw_bitmap(
+            panel_, 0, static_cast<int>(y), static_cast<int>(width), static_cast<int>(y + lines),
+            video_dma_buffer_);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Direct video frame draw failed: %s", esp_err_to_name(err));
+            if (pm_lock_ != nullptr) {
+                esp_pm_lock_release(pm_lock_);
+            }
+            return false;
+        }
+    }
+
+    if (pm_lock_ != nullptr) {
+        esp_pm_lock_release(pm_lock_);
+    }
+    return true;
 }
 
 #if CONFIG_USE_WECHAT_MESSAGE_STYLE

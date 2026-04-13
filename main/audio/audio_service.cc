@@ -174,6 +174,14 @@ void AudioService::Stop() {
         AS_EVENT_AUDIO_PROCESSOR_RUNNING);
 
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    {
+        std::lock_guard<std::mutex> clock_lock(playback_clock_mutex_);
+        ResetPlaybackClockLocked();
+    }
+    {
+        std::lock_guard<std::mutex> metrics_lock(playback_metrics_mutex_);
+        ResetPlaybackMetricsLocked();
+    }
     audio_encode_queue_.clear();
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
@@ -306,7 +314,59 @@ void AudioService::AudioOutputTask() {
             codec_->EnableOutput(true);
         }
 
-        codec_->OutputData(task->pcm);
+        int frame_duration_ms = task->frame_duration_ms;
+        if (codec_->output_sample_rate() > 0 && !task->pcm.empty()) {
+            int pcm_duration_ms = static_cast<int>(
+                (static_cast<int64_t>(task->pcm.size()) * 1000) / codec_->output_sample_rate());
+            if (task->type == kAudioTaskTypeDecodeToPlaybackQueue) {
+                // Sync video playback to the real amount of PCM handed to I2S,
+                // not the nominal packet metadata. If decode/resample produces
+                // longer frames than expected, the metadata clock runs slow.
+                frame_duration_ms = pcm_duration_ms;
+            } else if (frame_duration_ms <= 0) {
+                frame_duration_ms = pcm_duration_ms;
+            }
+        }
+        int64_t output_start_us = esp_timer_get_time();
+        {
+            std::lock_guard<std::mutex> clock_lock(playback_clock_mutex_);
+            playback_clock_output_start_us_ = output_start_us;
+            playback_clock_packet_start_ms_ = task->timestamp;
+            playback_clock_packet_duration_ms_ = std::max(frame_duration_ms, 0);
+            playback_clock_valid_ = true;
+            playback_clock_active_ = true;
+        }
+
+        int samples_written = codec_->OutputData(task->pcm);
+        int64_t output_elapsed_us = esp_timer_get_time() - output_start_us;
+        int output_elapsed_ms = static_cast<int>((output_elapsed_us + 999) / 1000);
+        int actual_written_duration_ms = 0;
+        if (codec_->output_sample_rate() > 0 && samples_written > 0) {
+            actual_written_duration_ms = static_cast<int>(
+                (static_cast<int64_t>(samples_written) * 1000) / codec_->output_sample_rate());
+        }
+        int effective_frame_duration_ms =
+            std::max(std::max(frame_duration_ms, actual_written_duration_ms), output_elapsed_ms);
+
+        {
+            std::lock_guard<std::mutex> clock_lock(playback_clock_mutex_);
+            playback_clock_last_completed_ms_ =
+                static_cast<int64_t>(task->timestamp) + std::max(effective_frame_duration_ms, 0);
+            playback_clock_packet_duration_ms_ = std::max(effective_frame_duration_ms, 0);
+            playback_clock_active_ = false;
+            playback_clock_output_start_us_ = 0;
+        }
+        {
+            std::lock_guard<std::mutex> metrics_lock(playback_metrics_mutex_);
+            playback_metrics_.output_calls++;
+            playback_metrics_.output_write_time_us_total += output_elapsed_us;
+            playback_metrics_.max_output_write_ms =
+                std::max(playback_metrics_.max_output_write_ms, output_elapsed_ms);
+            playback_metrics_.output_samples_written += std::max(samples_written, 0);
+            if (samples_written >= 0 && samples_written < static_cast<int>(task->pcm.size())) {
+                playback_metrics_.output_underrun_count++;
+            }
+        }
 
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
@@ -346,6 +406,7 @@ void AudioService::OpusCodecTask() {
             auto task = std::make_unique<AudioTask>();
             task->type = kAudioTaskTypeDecodeToPlaybackQueue;
             task->timestamp = packet->timestamp;
+            task->frame_duration_ms = packet->frame_duration;
 
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
             if (opus_decoder_ != nullptr) {
@@ -673,10 +734,52 @@ void AudioService::ResetDecoder() {
     }
     decoder_lock.unlock();
     timestamp_queue_.clear();
+    {
+        std::lock_guard<std::mutex> clock_lock(playback_clock_mutex_);
+        ResetPlaybackClockLocked();
+    }
+    {
+        std::lock_guard<std::mutex> metrics_lock(playback_metrics_mutex_);
+        ResetPlaybackMetricsLocked();
+    }
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
     audio_testing_queue_.clear();
     audio_queue_cv_.notify_all();
+}
+
+int64_t AudioService::GetPlaybackPositionMs() {
+    std::lock_guard<std::mutex> lock(playback_clock_mutex_);
+    if (!playback_clock_valid_) {
+        return -1;
+    }
+    if (!playback_clock_active_) {
+        return playback_clock_last_completed_ms_;
+    }
+
+    int64_t elapsed_ms = 0;
+    if (playback_clock_output_start_us_ > 0) {
+        elapsed_ms = (esp_timer_get_time() - playback_clock_output_start_us_) / 1000;
+    }
+    return static_cast<int64_t>(playback_clock_packet_start_ms_) + elapsed_ms;
+}
+
+AudioPlaybackMetricsSnapshot AudioService::GetPlaybackMetrics() const {
+    std::lock_guard<std::mutex> lock(playback_metrics_mutex_);
+    return playback_metrics_;
+}
+
+void AudioService::ResetPlaybackClockLocked() {
+    playback_clock_output_start_us_ = 0;
+    playback_clock_last_completed_ms_ = -1;
+    playback_clock_packet_start_ms_ = 0;
+    playback_clock_packet_duration_ms_ = 0;
+    playback_clock_valid_ = false;
+    playback_clock_active_ = false;
+}
+
+void AudioService::ResetPlaybackMetricsLocked() {
+    playback_metrics_ = AudioPlaybackMetricsSnapshot{};
 }
 
 void AudioService::CheckAndUpdateAudioPowerState() {

@@ -112,6 +112,11 @@ private:
         int64_t audio_push_time_us_total = 0;
         int64_t max_audio_push_us = 0;
         int64_t max_audio_push_block_us = 0;
+        size_t audio_output_calls = 0;
+        size_t audio_output_underrun_count = 0;
+        int64_t audio_output_samples_written = 0;
+        int64_t audio_output_write_time_us_total = 0;
+        int64_t max_audio_output_write_us = 0;
         size_t video_frames_seen = 0;
         int64_t video_bytes_seen = 0;
         int64_t video_frame_copy_time_us_total = 0;
@@ -150,7 +155,14 @@ private:
     std::string  current_id_;
     std::string  current_title_;
     std::string  stream_url_;
+    std::string  sync_frame_url_;
+    std::string  sync_audio_url_;
     std::string  error_msg_;
+    bool         use_sync_media_api_ = false;
+    int          current_duration_ms_ = 0;
+    int          sync_audio_packet_ms_ = 60;
+    int          sync_audio_batch_packets_ = 8;
+    int          sync_frame_lead_ms_ = 20;
 
     TaskHandle_t stream_task_handle_ = nullptr;
     TaskHandle_t render_task_handle_ = nullptr;
@@ -192,12 +204,16 @@ private:
     static constexpr size_t   kFrameBytes    = kFrameW * kFrameH * 2;  // RGB565
     static constexpr size_t   kJpegBufSize   = 32 * 1024;              // 32 KB max JPEG
     static constexpr size_t   kMaxQueuedVideoFrames = 10;
+    static constexpr uint32_t kStreamTaskStackWords = 8192;            // 32 KB for sync_v1 single-task decode/render
+    static constexpr uint32_t kRenderTaskStackWords = 3072;            // 12 KB
     static constexpr size_t   kAudioPrebufferPackets = 4;              // 240 ms
     static constexpr int      kMaxStreamResumeAttempts = 6;
     static constexpr int      kStreamResumeBackoffMs = 250;
     static constexpr int64_t  kFrameSelectionLeadUs = 50000;           // prefer the newest frame due within 50 ms
     static constexpr int64_t  kFutureFrameRecheckUs = 40000;           // recheck pacing every 40 ms instead of long sleeps
     static constexpr int64_t  kLateFrameDropUs = 500000;               // allow a wider sync window
+    static constexpr int64_t  kRenderStallResyncUs = 1500000;          // if nothing renders for 1.5 s, re-anchor video timing
+    static constexpr int64_t  kResyncLeadUs = 20000;                   // re-enter playback slightly ahead of "now"
     static constexpr int64_t  kHttpReadStallWarnUs = 80000;            // >80 ms read gap
     static constexpr int64_t  kAudioPushBlockWarnUs = 20000;           // >20 ms queue wait
     static constexpr int64_t  kPlaybackProgressIntervalUs = 5000000;   // 5 s
