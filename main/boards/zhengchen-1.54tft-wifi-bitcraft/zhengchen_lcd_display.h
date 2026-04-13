@@ -27,6 +27,16 @@ protected:
 public:
     using SpiLcdDisplay::SpiLcdDisplay;
 
+    bool PresentVideoFrameRGB565(const uint8_t* data, size_t data_len,
+                                 size_t width, size_t height, size_t stride) override {
+        (void)data;
+        (void)data_len;
+        (void)width;
+        (void)height;
+        (void)stride;
+        return false;
+    }
+
     // Hide the emoji in idle/standby states; reveal center_label_ instead.
     void SetEmotion(const char* emotion) override {
         bool is_idle = (strcmp(emotion, "neutral") == 0 ||
