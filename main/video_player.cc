@@ -405,6 +405,7 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
     auto* duration_s_j = cJSON_GetObjectItem(root, "duration_s");
     auto* sync_audio_packet_ms_j = cJSON_GetObjectItem(root, "sync_audio_packet_ms");
     auto* sync_audio_batch_packets_j = cJSON_GetObjectItem(root, "sync_audio_batch_packets");
+    auto* sync_video_batch_frames_j = cJSON_GetObjectItem(root, "sync_video_batch_frames");
     auto* sync_frame_lead_ms_j = cJSON_GetObjectItem(root, "sync_frame_lead_ms");
     if (!cJSON_IsString(title_j) || !cJSON_IsString(url_j)) {
         cJSON_Delete(root);
@@ -425,6 +426,8 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
         cJSON_IsNumber(sync_audio_packet_ms_j) ? sync_audio_packet_ms_j->valueint : 60;
     int saved_sync_audio_batch_packets =
         cJSON_IsNumber(sync_audio_batch_packets_j) ? sync_audio_batch_packets_j->valueint : 96;
+    int saved_sync_video_batch_frames =
+        cJSON_IsNumber(sync_video_batch_frames_j) ? sync_video_batch_frames_j->valueint : 12;
     int saved_sync_frame_lead_ms =
         cJSON_IsNumber(sync_frame_lead_ms_j) ? sync_frame_lead_ms_j->valueint : 20;
     cJSON_Delete(root);
@@ -438,6 +441,7 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
     current_duration_ms_ = saved_duration_ms;
     sync_audio_packet_ms_ = saved_sync_audio_packet_ms;
     sync_audio_batch_packets_ = saved_sync_audio_batch_packets;
+    sync_video_batch_frames_ = saved_sync_video_batch_frames;
     sync_frame_lead_ms_ = saved_sync_frame_lead_ms;
 
     Application::GetInstance().Schedule([this, saved_url, saved_title, item_id,
@@ -445,6 +449,7 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
                                          saved_sync_audio_url, saved_duration_ms,
                                          saved_sync_audio_packet_ms,
                                          saved_sync_audio_batch_packets,
+                                         saved_sync_video_batch_frames,
                                          saved_sync_frame_lead_ms]() {
         // Stop any conflicting players.
         MediaPlayer::GetInstance().Stop();
@@ -461,6 +466,7 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
         current_duration_ms_ = saved_duration_ms;
         sync_audio_packet_ms_ = saved_sync_audio_packet_ms;
         sync_audio_batch_packets_ = saved_sync_audio_batch_packets;
+        sync_video_batch_frames_ = saved_sync_video_batch_frames;
         sync_frame_lead_ms_ = saved_sync_frame_lead_ms;
         reader_done_.store(false);
         playback_started_.store(false);
@@ -572,6 +578,7 @@ void VideoPlayer::StopPlayback() {
     current_duration_ms_ = 0;
     sync_audio_packet_ms_ = 60;
     sync_audio_batch_packets_ = 96;
+    sync_video_batch_frames_ = 12;
     sync_frame_lead_ms_ = 20;
     error_msg_     = "";
     stream_task_handle_ = nullptr;
@@ -682,12 +689,13 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         constexpr int kSyncStartupSettleDelayMs = 200;
         constexpr int kSyncTargetBufferedBatches = 2;
         constexpr int kSyncStartupPrebufferPackets = 24;
+        constexpr int kSyncTargetBufferedFrameBatches = 2;
 
         size_t queued_frames = 0;
         size_t audio_packets_buffered = 0;
         uint32_t next_audio_ts_ms = 0;
-        int64_t last_requested_frame_bucket_ms = -1;
-        int64_t last_enqueued_frame_ts_ms = -1;
+        uint32_t next_video_fetch_ts_ms = 0;
+        std::deque<QueuedVideoFrame> pending_video_frames;
         int64_t last_sync_activity_us = esp_timer_get_time();
         std::string sync_failure_reason = "sync_audio_fetch_failed";
         bool audio_finished = false;
@@ -1012,42 +1020,78 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         frame_dsc.header.stride = static_cast<uint16_t>(kFrameW * 2);
         frame_dsc.data_size     = kFrameBytes;
 
-        auto fetch_video_frame = [&](int64_t target_ms,
-                                     uint32_t& frame_ts_ms,
-                                     std::vector<uint8_t>& jpeg) -> bool {
-            std::string frame_ts_header;
-            std::string url = self->sync_frame_url_ + "/" + std::to_string(target_ms);
-            if (!fetch_binary(url, jpeg, &frame_ts_header)) {
+        auto fetch_video_batch = [&](uint32_t start_ms) -> bool {
+            std::vector<uint8_t> body;
+            std::string url = self->sync_frame_url_ + "/" + std::to_string(start_ms) + "/" +
+                              std::to_string(self->sync_video_batch_frames_);
+            if (!fetch_binary(url, body, nullptr)) {
                 return false;
             }
-            if (jpeg.empty()) {
+            if (body.empty()) {
+                next_video_fetch_ts_ms = start_ms + (self->sync_video_batch_frames_ * kSyncFrameIntervalMs);
                 return true;
             }
 
-            frame_ts_ms = static_cast<uint32_t>(std::max<int64_t>(0, target_ms));
-            if (!frame_ts_header.empty()) {
-                frame_ts_ms = static_cast<uint32_t>(std::strtoul(frame_ts_header.c_str(), nullptr, 10));
-            }
-            if (last_rendered_frame_ts_ms == static_cast<int64_t>(frame_ts_ms)) {
-                jpeg.clear();
-                return true;
-            }
+            size_t offset = 0;
+            while (offset + 16 <= body.size()) {
+                uint32_t magic = ((uint32_t)body[offset] << 24) |
+                                 ((uint32_t)body[offset + 1] << 16) |
+                                 ((uint32_t)body[offset + 2] << 8) |
+                                 (uint32_t)body[offset + 3];
+                uint32_t frame_type = ((uint32_t)body[offset + 4] << 24) |
+                                      ((uint32_t)body[offset + 5] << 16) |
+                                      ((uint32_t)body[offset + 6] << 8) |
+                                      (uint32_t)body[offset + 7];
+                uint32_t payload_len = ((uint32_t)body[offset + 8] << 24) |
+                                       ((uint32_t)body[offset + 9] << 16) |
+                                       ((uint32_t)body[offset + 10] << 8) |
+                                       (uint32_t)body[offset + 11];
+                uint32_t ts_ms = ((uint32_t)body[offset + 12] << 24) |
+                                 ((uint32_t)body[offset + 13] << 16) |
+                                 ((uint32_t)body[offset + 14] << 8) |
+                                 (uint32_t)body[offset + 15];
+                offset += 16;
 
-            int64_t now_us = esp_timer_get_time();
-            {
-                std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
-                self->playback_stats_.video_frames_seen++;
-                self->playback_stats_.video_bytes_seen += jpeg.size();
-                self->playback_stats_.max_queued_video_frames =
-                    std::max(self->playback_stats_.max_queued_video_frames, static_cast<size_t>(1));
-                if (self->playback_stats_.first_video_frame_us == 0 &&
-                    self->playback_stats_.start_us > 0) {
-                    self->playback_stats_.first_video_frame_us =
-                        now_us - self->playback_stats_.start_us;
+                if (magic != kFrameMagic || frame_type != kFrameVideo ||
+                    offset + payload_len > body.size()) {
+                    ESP_LOGE(TAG, "Malformed sync video batch");
+                    sync_failure_reason = "sync_video_batch_malformed";
+                    return false;
                 }
+
+                if (ts_ms > static_cast<uint32_t>(std::max<int64_t>(0, last_rendered_frame_ts_ms)) &&
+                    (pending_video_frames.empty() || ts_ms > pending_video_frames.back().ts_ms)) {
+                    QueuedVideoFrame frame;
+                    frame.ts_ms = ts_ms;
+                    frame.jpeg.assign(body.begin() + offset, body.begin() + offset + payload_len);
+                    pending_video_frames.push_back(std::move(frame));
+
+                    int64_t now_us = esp_timer_get_time();
+                    {
+                        std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+                        self->playback_stats_.video_frames_seen++;
+                        self->playback_stats_.video_bytes_seen += payload_len;
+                        self->playback_stats_.max_queued_video_frames =
+                            std::max(self->playback_stats_.max_queued_video_frames,
+                                     pending_video_frames.size());
+                        if (self->playback_stats_.first_video_frame_us == 0 &&
+                            self->playback_stats_.start_us > 0) {
+                            self->playback_stats_.first_video_frame_us =
+                                now_us - self->playback_stats_.start_us;
+                        }
+                    }
+                    queued_frames++;
+                    last_sync_activity_us = now_us;
+                }
+
+                next_video_fetch_ts_ms = ts_ms + kSyncFrameIntervalMs;
+                offset += payload_len;
             }
-            queued_frames++;
-            last_sync_activity_us = now_us;
+
+            if (offset != body.size()) {
+                sync_failure_reason = "sync_video_batch_trailing_bytes";
+                return false;
+            }
             return true;
         };
 
@@ -1184,24 +1228,46 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             }
 
             if (self->playback_started_.load() && frame_clock_ms >= 0) {
-                int64_t request_ms = std::max<int64_t>(0, frame_clock_ms + self->sync_frame_lead_ms_);
-                int64_t request_bucket_ms =
-                    (request_ms / kSyncFrameIntervalMs) * kSyncFrameIntervalMs;
-                if (request_bucket_ms != last_requested_frame_bucket_ms &&
-                    (self->current_duration_ms_ <= 0 || request_bucket_ms <= self->current_duration_ms_)) {
-                    std::vector<uint8_t> frame_jpeg;
-                    uint32_t frame_ts_ms = 0;
-                    if (!fetch_video_frame(request_ms, frame_ts_ms, frame_jpeg)) {
+                int dropped_batch_frames = 0;
+                while (pending_video_frames.size() > 1 &&
+                       pending_video_frames[1].ts_ms <=
+                           static_cast<uint32_t>(frame_clock_ms + self->sync_frame_lead_ms_)) {
+                    pending_video_frames.pop_front();
+                    dropped_batch_frames++;
+                    self->dropped_frames_++;
+                }
+                if (dropped_batch_frames > 0) {
+                    std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+                    self->playback_stats_.render_backlog_drop_count += dropped_batch_frames;
+                    self->playback_stats_.dropped_frames = self->dropped_frames_;
+                }
+
+                if (!pending_video_frames.empty() &&
+                    pending_video_frames.front().ts_ms <=
+                        static_cast<uint32_t>(frame_clock_ms + self->sync_frame_lead_ms_)) {
+                    auto frame = std::move(pending_video_frames.front());
+                    pending_video_frames.pop_front();
+                    if (!present_video_frame(frame.ts_ms, frame.jpeg, frame_clock_ms)) {
                         fatal_error = true;
                         self->SetPlaybackEndReason(sync_failure_reason.c_str());
                         break;
                     }
-                    last_requested_frame_bucket_ms = request_bucket_ms;
-                    if (!frame_jpeg.empty() &&
-                        !present_video_frame(frame_ts_ms, frame_jpeg, frame_clock_ms)) {
-                        fatal_error = true;
-                        self->SetPlaybackEndReason(sync_failure_reason.c_str());
-                        break;
+                }
+
+                int target_buffered_frames = std::max(
+                    self->sync_video_batch_frames_,
+                    self->sync_video_batch_frames_ * kSyncTargetBufferedFrameBatches);
+                if (pending_video_frames.size() < static_cast<size_t>(target_buffered_frames)) {
+                    uint32_t fetch_start_ms = static_cast<uint32_t>(std::max<int64_t>(
+                        0, std::max<int64_t>(next_video_fetch_ts_ms,
+                                             frame_clock_ms + self->sync_frame_lead_ms_)));
+                    if (self->current_duration_ms_ <= 0 ||
+                        fetch_start_ms <= static_cast<uint32_t>(self->current_duration_ms_)) {
+                        if (!fetch_video_batch(fetch_start_ms)) {
+                            fatal_error = true;
+                            self->SetPlaybackEndReason(sync_failure_reason.c_str());
+                            break;
+                        }
                     }
                 }
             }
@@ -1216,11 +1282,11 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             }
 
             if (self->playback_started_.load() &&
-                (audio_clock_ms >= 0 || last_enqueued_frame_ts_ms >= 0)) {
+                (audio_clock_ms >= 0 || !pending_video_frames.empty())) {
                 self->MaybePostPlaybackProgress();
             }
             if (self->playback_started_.load() &&
-                last_requested_frame_bucket_ms < 0 &&
+                pending_video_frames.empty() &&
                 (esp_timer_get_time() - last_sync_activity_us) > 2000000) {
                 fatal_error = true;
                 self->SetPlaybackEndReason("sync_start_stalled");

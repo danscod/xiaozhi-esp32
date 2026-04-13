@@ -162,6 +162,7 @@ private:
     int          current_duration_ms_ = 0;
     int          sync_audio_packet_ms_ = 60;
     int          sync_audio_batch_packets_ = 8;
+    int          sync_video_batch_frames_ = 12;
     int          sync_frame_lead_ms_ = 20;
 
     TaskHandle_t stream_task_handle_ = nullptr;
