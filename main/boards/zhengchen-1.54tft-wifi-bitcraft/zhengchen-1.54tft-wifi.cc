@@ -216,7 +216,10 @@ private:
         io_config.dc_gpio_num = DISPLAY_DC;
         io_config.spi_mode = 3;
         io_config.pclk_hz = 80 * 1000 * 1000;
-        io_config.trans_queue_depth = 10;
+        // The direct video path reuses a single DMA staging buffer for chunked panel writes.
+        // Keep the SPI transaction queue depth at 1 so we don't overwrite that buffer while
+        // an earlier transfer is still in flight, which shows up as tearing/interlaced lines.
+        io_config.trans_queue_depth = 1;
         io_config.lcd_cmd_bits = 8;
         io_config.lcd_param_bits = 8;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &panel_io_));
