@@ -716,8 +716,8 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         auto fetch_binary = [&](const std::string& url,
                                 std::vector<uint8_t>& body,
                                 std::string* frame_ts_header) -> bool {
-            constexpr int kSyncHttpTimeoutMs = 6000;
-            constexpr int kSyncHttpMaxAttempts = 2;
+            constexpr int kSyncHttpTimeoutMs = 15000;
+            constexpr int kSyncHttpMaxAttempts = 3;
 
             for (int attempt = 1; attempt <= kSyncHttpMaxAttempts; ++attempt) {
                 auto http = network->CreateHttp(0);
