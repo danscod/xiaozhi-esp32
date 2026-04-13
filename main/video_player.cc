@@ -427,7 +427,7 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
     int saved_sync_audio_batch_packets =
         cJSON_IsNumber(sync_audio_batch_packets_j) ? sync_audio_batch_packets_j->valueint : 96;
     int saved_sync_video_batch_frames =
-        cJSON_IsNumber(sync_video_batch_frames_j) ? sync_video_batch_frames_j->valueint : 48;
+        cJSON_IsNumber(sync_video_batch_frames_j) ? sync_video_batch_frames_j->valueint : 16;
     int saved_sync_frame_lead_ms =
         cJSON_IsNumber(sync_frame_lead_ms_j) ? sync_frame_lead_ms_j->valueint : 20;
     cJSON_Delete(root);
@@ -578,7 +578,7 @@ void VideoPlayer::StopPlayback() {
     current_duration_ms_ = 0;
     sync_audio_packet_ms_ = 60;
     sync_audio_batch_packets_ = 96;
-    sync_video_batch_frames_ = 48;
+    sync_video_batch_frames_ = 16;
     sync_frame_lead_ms_ = 20;
     error_msg_     = "";
     stream_task_handle_ = nullptr;
