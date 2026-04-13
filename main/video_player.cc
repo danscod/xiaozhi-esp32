@@ -429,7 +429,7 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
     int saved_sync_video_batch_frames =
         cJSON_IsNumber(sync_video_batch_frames_j) ? sync_video_batch_frames_j->valueint : 16;
     int saved_sync_frame_lead_ms =
-        cJSON_IsNumber(sync_frame_lead_ms_j) ? sync_frame_lead_ms_j->valueint : 20;
+        cJSON_IsNumber(sync_frame_lead_ms_j) ? sync_frame_lead_ms_j->valueint : 2500;
     cJSON_Delete(root);
 
     current_title_ = saved_title;
@@ -579,7 +579,7 @@ void VideoPlayer::StopPlayback() {
     sync_audio_packet_ms_ = 60;
     sync_audio_batch_packets_ = 96;
     sync_video_batch_frames_ = 16;
-    sync_frame_lead_ms_ = 20;
+    sync_frame_lead_ms_ = 2500;
     error_msg_     = "";
     stream_task_handle_ = nullptr;
     render_task_handle_ = nullptr;
@@ -713,9 +713,23 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             }
         };
 
+        auto parse_timestamp_header = [](const std::string& value, uint32_t* out) -> bool {
+            if (!out || value.empty()) {
+                return false;
+            }
+            char* end = nullptr;
+            unsigned long parsed = std::strtoul(value.c_str(), &end, 10);
+            if (end == value.c_str() || (end && *end != '\0')) {
+                return false;
+            }
+            *out = static_cast<uint32_t>(parsed);
+            return true;
+        };
+
         auto fetch_binary = [&](const std::string& url,
                                 std::vector<uint8_t>& body,
-                                std::string* frame_ts_header) -> bool {
+                                std::string* frame_ts_header,
+                                std::string* next_ts_header) -> bool {
             constexpr int kSyncHttpTimeoutMs = 15000;
             constexpr int kSyncHttpMaxAttempts = 3;
 
@@ -770,6 +784,13 @@ void VideoPlayer::StreamReaderTask(void* arg) {
 
                 if (frame_ts_header != nullptr) {
                     *frame_ts_header = http->GetResponseHeader("X-Frame-Timestamp-Ms");
+                }
+                if (next_ts_header != nullptr) {
+                    std::string next_header = http->GetResponseHeader("X-Video-Next-Timestamp-Ms");
+                    if (next_header.empty()) {
+                        next_header = http->GetResponseHeader("X-Audio-Next-Timestamp-Ms");
+                    }
+                    *next_ts_header = next_header;
                 }
                 size_t expected_length = http->GetBodyLength();
                 body.clear();
@@ -871,9 +892,10 @@ void VideoPlayer::StreamReaderTask(void* arg) {
 
         auto fetch_audio_batch = [&](uint32_t start_ms) -> bool {
             std::vector<uint8_t> body;
+            std::string next_ts_header;
             std::string url = self->sync_audio_url_ + "/" + std::to_string(start_ms) + "/" +
                               std::to_string(self->sync_audio_batch_packets_);
-            if (!fetch_binary(url, body, nullptr)) {
+            if (!fetch_binary(url, body, nullptr, &next_ts_header)) {
                 if (sync_failure_reason.empty()) {
                     sync_failure_reason = "sync_audio_fetch_failed";
                 }
@@ -981,6 +1003,10 @@ void VideoPlayer::StreamReaderTask(void* arg) {
                 sync_failure_reason = "sync_audio_batch_trailing_bytes";
                 return false;
             }
+            uint32_t next_ts_from_header = 0;
+            if (parse_timestamp_header(next_ts_header, &next_ts_from_header)) {
+                next_audio_ts_ms = next_ts_from_header;
+            }
             return true;
         };
 
@@ -1022,13 +1048,20 @@ void VideoPlayer::StreamReaderTask(void* arg) {
 
         auto fetch_video_batch = [&](uint32_t start_ms) -> bool {
             std::vector<uint8_t> body;
+            std::string next_ts_header;
             std::string url = self->sync_frame_url_ + "/" + std::to_string(start_ms) + "/" +
                               std::to_string(self->sync_video_batch_frames_);
-            if (!fetch_binary(url, body, nullptr)) {
+            if (!fetch_binary(url, body, nullptr, &next_ts_header)) {
                 return false;
             }
             if (body.empty()) {
-                next_video_fetch_ts_ms = start_ms + (self->sync_video_batch_frames_ * kSyncFrameIntervalMs);
+                uint32_t next_ts_from_header = 0;
+                if (parse_timestamp_header(next_ts_header, &next_ts_from_header)) {
+                    next_video_fetch_ts_ms = next_ts_from_header;
+                } else {
+                    next_video_fetch_ts_ms =
+                        start_ms + (self->sync_video_batch_frames_ * kSyncFrameIntervalMs);
+                }
                 return true;
             }
 
@@ -1091,6 +1124,10 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             if (offset != body.size()) {
                 sync_failure_reason = "sync_video_batch_trailing_bytes";
                 return false;
+            }
+            uint32_t next_ts_from_header = 0;
+            if (parse_timestamp_header(next_ts_header, &next_ts_from_header)) {
+                next_video_fetch_ts_ms = next_ts_from_header;
             }
             return true;
         };
@@ -1208,6 +1245,19 @@ void VideoPlayer::StreamReaderTask(void* arg) {
                 frame_clock_ms = std::max<int64_t>(
                     0, static_cast<int64_t>(next_audio_ts_ms) - self->sync_audio_packet_ms_);
             }
+            int video_fetch_lead_ms = std::max(self->sync_frame_lead_ms_, 2500);
+            {
+                std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
+                int observed_stall_ms =
+                    static_cast<int>(self->playback_stats_.max_http_read_stall_us / 1000);
+                if (observed_stall_ms > 0) {
+                    video_fetch_lead_ms = std::max(video_fetch_lead_ms, observed_stall_ms + 750);
+                }
+            }
+            video_fetch_lead_ms = std::max(
+                video_fetch_lead_ms,
+                self->sync_video_batch_frames_ * kSyncFrameIntervalMs);
+            video_fetch_lead_ms = std::min(video_fetch_lead_ms, 8000);
 
             if (self->playback_started_.load() && frame_clock_ms >= 0) {
                 bool presented_due_frame = false;
@@ -1250,9 +1300,17 @@ void VideoPlayer::StreamReaderTask(void* arg) {
                     self->sync_video_batch_frames_,
                     self->sync_video_batch_frames_ * kSyncTargetBufferedFrameBatches);
                 if (pending_video_frames.size() < static_cast<size_t>(target_buffered_frames)) {
+                    int64_t desired_fetch_start_ms = frame_clock_ms + video_fetch_lead_ms;
+                    int64_t batch_span_ms =
+                        static_cast<int64_t>(self->sync_video_batch_frames_) * kSyncFrameIntervalMs;
+                    if (next_video_fetch_ts_ms == 0 ||
+                        static_cast<int64_t>(next_video_fetch_ts_ms) <
+                            desired_fetch_start_ms - batch_span_ms) {
+                        next_video_fetch_ts_ms =
+                            static_cast<uint32_t>(std::max<int64_t>(0, desired_fetch_start_ms));
+                    }
                     uint32_t fetch_start_ms = static_cast<uint32_t>(std::max<int64_t>(
-                        0, std::max<int64_t>(next_video_fetch_ts_ms,
-                                             frame_clock_ms + self->sync_frame_lead_ms_)));
+                        0, std::max<int64_t>(next_video_fetch_ts_ms, desired_fetch_start_ms)));
                     if (self->current_duration_ms_ <= 0 ||
                         fetch_start_ms <= static_cast<uint32_t>(self->current_duration_ms_)) {
                         if (!fetch_video_batch(fetch_start_ms)) {
