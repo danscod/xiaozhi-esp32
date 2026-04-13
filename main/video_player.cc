@@ -427,7 +427,7 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
     int saved_sync_audio_batch_packets =
         cJSON_IsNumber(sync_audio_batch_packets_j) ? sync_audio_batch_packets_j->valueint : 96;
     int saved_sync_video_batch_frames =
-        cJSON_IsNumber(sync_video_batch_frames_j) ? sync_video_batch_frames_j->valueint : 12;
+        cJSON_IsNumber(sync_video_batch_frames_j) ? sync_video_batch_frames_j->valueint : 48;
     int saved_sync_frame_lead_ms =
         cJSON_IsNumber(sync_frame_lead_ms_j) ? sync_frame_lead_ms_j->valueint : 20;
     cJSON_Delete(root);
@@ -578,7 +578,7 @@ void VideoPlayer::StopPlayback() {
     current_duration_ms_ = 0;
     sync_audio_packet_ms_ = 60;
     sync_audio_batch_packets_ = 96;
-    sync_video_batch_frames_ = 12;
+    sync_video_batch_frames_ = 48;
     sync_frame_lead_ms_ = 20;
     error_msg_     = "";
     stream_task_handle_ = nullptr;
@@ -1203,24 +1203,6 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             }
 
             int64_t audio_clock_ms = audio.GetPlaybackPositionMs();
-            int64_t reference_ms = audio_clock_ms >= 0 ? audio_clock_ms : 0;
-            int target_buffered_packets = std::max(
-                kSyncStartupPrebufferPackets,
-                self->sync_audio_batch_packets_ * kSyncTargetBufferedBatches);
-            int64_t desired_audio_buffer_until_ms =
-                reference_ms + static_cast<int64_t>(target_buffered_packets *
-                                                    self->sync_audio_packet_ms_);
-
-            if (!audio_finished && next_audio_ts_ms < desired_audio_buffer_until_ms) {
-                if (!fetch_audio_batch(next_audio_ts_ms)) {
-                    fatal_error = true;
-                    self->SetPlaybackEndReason(sync_failure_reason.c_str());
-                }
-            }
-            if (fatal_error) {
-                break;
-            }
-
             int64_t frame_clock_ms = audio_clock_ms;
             if (frame_clock_ms < 0 && self->playback_started_.load() && next_audio_ts_ms > 0) {
                 frame_clock_ms = std::max<int64_t>(
@@ -1228,6 +1210,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             }
 
             if (self->playback_started_.load() && frame_clock_ms >= 0) {
+                bool presented_due_frame = false;
                 int dropped_batch_frames = 0;
                 while (pending_video_frames.size() > 1 &&
                        pending_video_frames[1].ts_ms <=
@@ -1247,11 +1230,20 @@ void VideoPlayer::StreamReaderTask(void* arg) {
                         static_cast<uint32_t>(frame_clock_ms + self->sync_frame_lead_ms_)) {
                     auto frame = std::move(pending_video_frames.front());
                     pending_video_frames.pop_front();
+                    presented_due_frame = true;
                     if (!present_video_frame(frame.ts_ms, frame.jpeg, frame_clock_ms)) {
                         fatal_error = true;
                         self->SetPlaybackEndReason(sync_failure_reason.c_str());
                         break;
                     }
+                }
+                if (fatal_error) {
+                    break;
+                }
+
+                if (presented_due_frame) {
+                    self->MaybePostPlaybackProgress();
+                    continue;
                 }
 
                 int target_buffered_frames = std::max(
@@ -1270,6 +1262,27 @@ void VideoPlayer::StreamReaderTask(void* arg) {
                         }
                     }
                 }
+                if (fatal_error) {
+                    break;
+                }
+            }
+
+            int64_t reference_ms = audio_clock_ms >= 0 ? audio_clock_ms : 0;
+            int target_buffered_packets = std::max(
+                kSyncStartupPrebufferPackets,
+                self->sync_audio_batch_packets_ * kSyncTargetBufferedBatches);
+            int64_t desired_audio_buffer_until_ms =
+                reference_ms + static_cast<int64_t>(target_buffered_packets *
+                                                    self->sync_audio_packet_ms_);
+
+            if (!audio_finished && next_audio_ts_ms < desired_audio_buffer_until_ms) {
+                if (!fetch_audio_batch(next_audio_ts_ms)) {
+                    fatal_error = true;
+                    self->SetPlaybackEndReason(sync_failure_reason.c_str());
+                }
+            }
+            if (fatal_error) {
+                break;
             }
 
             if (audio_finished && self->playback_started_.load()) {
