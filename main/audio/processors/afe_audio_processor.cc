@@ -55,6 +55,8 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
 
     afe_config->agc_init = false;
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
+    // Pin AFE internal task to core 0 — core 1 is reserved for video render.
+    afe_config->afe_perferred_core = 0;
 
 #ifdef CONFIG_USE_DEVICE_AEC
     afe_config->aec_init = true;
@@ -66,12 +68,27 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
 
     afe_iface_ = esp_afe_handle_from_config(afe_config);
     afe_data_ = afe_iface_->create_from_config(afe_config);
-    
-    xTaskCreate([](void* arg) {
+    if (afe_data_ == nullptr) {
+        ESP_LOGE(TAG, "AFE create_from_config returned null — likely OOM");
+        return;
+    }
+
+    // Prefer PSRAM stack (saves internal SRAM for the WS hello path), but fall
+    // back to DRAM if PSRAM is exhausted (e.g. by video frame buffers).
+    // Task is pinned to core 0 to avoid preemption by the video render on core 1.
+    BaseType_t task_result = xTaskCreatePinnedToCoreWithCaps([](void* arg) {
         auto this_ = (AfeAudioProcessor*)arg;
         this_->AudioProcessorTask();
         vTaskDelete(NULL);
-    }, "audio_communication", 4096, this, 3, NULL);
+    }, "audio_communication", 4096, this, 3, NULL, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (task_result != pdPASS) {
+        ESP_LOGW(TAG, "PSRAM task stack allocation failed, retrying with DRAM");
+        xTaskCreatePinnedToCore([](void* arg) {
+            auto this_ = (AfeAudioProcessor*)arg;
+            this_->AudioProcessorTask();
+            vTaskDelete(NULL);
+        }, "audio_communication", 4096, this, 3, NULL, 0);
+    }
 }
 
 AfeAudioProcessor::~AfeAudioProcessor() {
