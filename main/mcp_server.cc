@@ -7,6 +7,7 @@
 #include "media_player.h"
 #include "flappy_bird.h"
 #include "video_player.h"
+#include "doom_player.h"
 #include <esp_log.h>
 #include <esp_app_desc.h>
 #include <algorithm>
@@ -167,6 +168,7 @@ void McpServer::AddCommonTools() {
     MediaPlayer::GetInstance().RegisterMcpTools();
     FlappyBird::GetInstance().RegisterMcpTools();
     VideoPlayer::GetInstance().RegisterMcpTools();
+    DoomPlayer::GetInstance().RegisterMcpTools();
 
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());

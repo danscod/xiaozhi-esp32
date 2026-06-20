@@ -73,18 +73,24 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     afe_config_t* afe_config = afe_config_init(input_format.c_str(), models_, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
     afe_config->aec_init = codec_->input_reference();
     afe_config->aec_mode = AEC_MODE_SR_HIGH_PERF;
-    afe_config->afe_perferred_core = 1;
+    // Core 0: video render owns core 1 during playback. AFE wake-word work
+    // is bursty and not real-time-critical, so it goes on core 0 with the
+    // other audio tasks.
+    afe_config->afe_perferred_core = 0;
     afe_config->afe_perferred_priority = 1;
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
     
     afe_iface_ = esp_afe_handle_from_config(afe_config);
     afe_data_ = afe_iface_->create_from_config(afe_config);
 
-    xTaskCreate([](void* arg) {
+    // Stack in PSRAM: internal SRAM is critically scarce at WS connect time.
+    // This task is I/O-bound (blocks on fetch_with_delay); PSRAM latency is
+    // irrelevant. Saves 4096 bytes of internal SRAM for the hello send path.
+    xTaskCreatePinnedToCoreWithCaps([](void* arg) {
         auto this_ = (AfeWakeWord*)arg;
         this_->AudioDetectionTask();
         vTaskDelete(NULL);
-    }, "audio_detection", 4096, this, 3, nullptr);
+    }, "audio_detection", 4096, this, 3, nullptr, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
     return true;
 }

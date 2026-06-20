@@ -2,6 +2,7 @@
 #include "media_player.h"
 #include "flappy_bird.h"
 #include "video_player.h"
+#include "doom_player.h"
 #include "codecs/no_audio_codec.h"
 #include "zhengchen_lcd_display.h"
 #include "system_reset.h"
@@ -147,6 +148,12 @@ private:
         boot_button_.OnLongPress([this]() {
             power_save_timer_->WakeUp();
             auto& app = Application::GetInstance();
+            auto& doom = DoomPlayer::GetInstance();
+            if (doom.GetState() != DoomPlayer::State::kIdle) {
+                doom.Stop();
+                app.SetDeviceState(kDeviceStateIdle);
+                return;
+            }
             auto& game = FlappyBird::GetInstance();
             if (game.IsActive()) {
                 game.Stop();

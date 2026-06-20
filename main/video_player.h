@@ -10,6 +10,7 @@
 #include <vector>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include "system_info.h"
 
 #include "telemetry.h"
 
@@ -145,6 +146,28 @@ private:
         int64_t first_video_frame_us = 0;
         int64_t playback_started_us = 0;
         int64_t first_frame_presented_us = 0;
+        // CPU snapshot captured at playback start. End-of-playback diff
+        // yields the per-core busy % over the playback window. See
+        // SystemInfo::GetCoreCpuStats / CoreCpuStats.
+        struct CpuSnapshot {
+            bool     valid = false;
+            uint64_t total_runtime = 0;
+            uint64_t core0_run_time = 0;
+            uint64_t core1_run_time = 0;
+            uint64_t core0_idle_run_time = 0;
+            uint64_t core1_idle_run_time = 0;
+        };
+        CpuSnapshot cpu_start;
+        // Per-task runtime snapshot at playback start. End-of-playback
+        // diff yields the single top CPU consumer DURING the playback
+        // window (not since boot). 48 slots covers any realistic task
+        // count; total ~1.2 KB stack/heap.
+        static constexpr size_t kMaxTaskSnapshotEntries = 48;
+        size_t cpu_start_task_count = 0;
+        // The actual storage is allocated on heap via cpu_start_tasks_buf;
+        // header keeps the count and the buf pointer in PlaybackStats.
+        // (Defined inline as a fixed array to avoid lifecycle issues.)
+        SystemInfo::TaskRunTimeEntry cpu_start_tasks[kMaxTaskSnapshotEntries];
     };
 
     static void StreamReaderTask(void* arg);
@@ -157,8 +180,10 @@ private:
     std::string  stream_url_;
     std::string  sync_frame_url_;
     std::string  sync_audio_url_;
+    std::string  ws_stream_url_;
     std::string  error_msg_;
     bool         use_sync_media_api_ = false;
+    bool         use_ws_media_api_ = false;
     int          current_duration_ms_ = 0;
     int          sync_audio_packet_ms_ = 60;
     int          sync_audio_batch_packets_ = 8;
@@ -204,7 +229,12 @@ private:
     static constexpr size_t   kFrameH        = 240;
     static constexpr size_t   kFrameBytes    = kFrameW * kFrameH * 2;  // RGB565
     static constexpr size_t   kJpegBufSize   = 32 * 1024;              // 32 KB max JPEG
-    static constexpr size_t   kMaxQueuedVideoFrames = 10;
+    // The queue needs to cover the server's lead (~10 s) at the highest
+    // expected source frame rate. At 8 fps that's 80 frames; at 24 fps
+    // that's 240. 320 covers up to 13 s of 24 fps video with margin,
+    // costs ~3 MB of transient PSRAM at peak (well within 8 MB available).
+    // (Was 40 originally, then 120 when 8 fps was max; bumped for 24 fps.)
+    static constexpr size_t   kMaxQueuedVideoFrames = 320;
     static constexpr uint32_t kStreamTaskStackWords = 8192;            // 32 KB for sync_v1 single-task decode/render
     static constexpr uint32_t kRenderTaskStackWords = 3072;            // 12 KB
     static constexpr size_t   kAudioPrebufferPackets = 4;              // 240 ms

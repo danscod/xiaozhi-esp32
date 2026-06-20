@@ -9,6 +9,8 @@
 #include <font_emoji.h>
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 
 #define PREVIEW_IMAGE_DURATION_MS 5000
@@ -35,6 +37,8 @@ protected:
     esp_timer_handle_t preview_timer_ = nullptr;
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
+    uint16_t* video_dma_buffer_ = nullptr;
+    size_t video_dma_buffer_pixels_ = 0;
 
     void InitializeLcdThemes();
     virtual bool Lock(int timeout_ms = 0) override;
@@ -51,11 +55,15 @@ public:
     virtual void ClearChatMessages() override;
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
     virtual void SetupUI() override;
+    virtual bool PresentVideoFrameRGB565(const uint8_t* data, size_t data_len,
+                                         size_t width, size_t height, size_t stride) override;
     // Add theme switching function
     virtual void SetTheme(Theme* theme) override;
     
     // Set whether to hide chat messages/subtitles
     void SetHideSubtitle(bool hide);
+
+    void* GetPanelHandle() override { return reinterpret_cast<void*>(panel_); }
 };
 
 // SPI LCD display

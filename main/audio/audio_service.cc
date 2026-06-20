@@ -128,42 +128,49 @@ void AudioService::Start() {
 
     esp_timer_start_periodic(audio_power_timer_, 1000000);
 
+    // Audio tasks: ALL pinned to core 0. Core 1 is dedicated to video render
+    // + LVGL during playback (which alone saturates the core). Floating audio
+    // tasks were landing on the already-busy core 1 and competing for cycles.
+    // Core 0 has tons of headroom (~17% busy on a Marge playback) so all
+    // audio work goes there.
 #if CONFIG_USE_AUDIO_PROCESSOR
-    /* Start the audio input task */
     xTaskCreatePinnedToCore([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioInputTask();
         vTaskDelete(NULL);
     }, "audio_input", 2048 * 3, this, 8, &audio_input_task_handle_, 0);
 
-    /* Start the audio output task */
-    xTaskCreate([](void* arg) {
+    xTaskCreatePinnedToCore([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioOutputTask();
         vTaskDelete(NULL);
-    }, "audio_output", 2048 * 2, this, 4, &audio_output_task_handle_);
+    }, "audio_output", 2048 * 2, this, 4, &audio_output_task_handle_, 0);
 #else
-    /* Start the audio input task */
-    xTaskCreate([](void* arg) {
+    xTaskCreatePinnedToCore([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioInputTask();
         vTaskDelete(NULL);
-    }, "audio_input", 2048 * 2, this, 8, &audio_input_task_handle_);
+    }, "audio_input", 2048 * 2, this, 8, &audio_input_task_handle_, 0);
 
-    /* Start the audio output task */
-    xTaskCreate([](void* arg) {
+    xTaskCreatePinnedToCore([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioOutputTask();
         vTaskDelete(NULL);
-    }, "audio_output", 2048, this, 4, &audio_output_task_handle_);
+    }, "audio_output", 2048, this, 4, &audio_output_task_handle_, 0);
 #endif
 
-    /* Start the opus codec task */
-    xTaskCreate([](void* arg) {
+    /* Start the opus codec task.
+     * Priority 4 + pinned to core 0: the video render task runs at priority 3
+     * on core 1 (decodes JPEG + drives LCD). Opus decode at priority 2 on a
+     * floating core was being preempted by render whenever they collided on
+     * core 1, draining the playback_queue and causing choppy audio. Core 0
+     * has the network stack but no other heavy CPU loads, so opus runs at
+     * full speed there. Priority 4 matches AudioOutputTask. */
+    xTaskCreatePinnedToCore([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->OpusCodecTask();
         vTaskDelete(NULL);
-    }, "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
+    }, "opus_codec", 2048 * 12, this, 4, &opus_codec_task_handle_, 0);
 }
 
 void AudioService::Stop() {

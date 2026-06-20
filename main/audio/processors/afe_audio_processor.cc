@@ -129,6 +129,11 @@ void AfeAudioProcessor::Start() {
 
 void AfeAudioProcessor::Stop() {
     xEventGroupClearBits(event_group_, PROCESSOR_RUNNING);
+    // Reset VAD speaking state so the next session doesn't inherit stale state.
+    // Without this, a session that ends while is_speaking_=true (e.g. user spoke
+    // while TTS was playing) will trigger an immediate VAD-stop callback on the
+    // first silent frame of the next listen session.
+    is_speaking_ = false;
 
     std::lock_guard<std::mutex> lock(input_buffer_mutex_);
     if (afe_data_ != nullptr) {
@@ -158,7 +163,10 @@ void AfeAudioProcessor::AudioProcessorTask() {
     while (true) {
         xEventGroupWaitBits(event_group_, PROCESSOR_RUNNING, pdFALSE, pdTRUE, portMAX_DELAY);
 
-        auto res = afe_iface_->fetch_with_delay(afe_data_, portMAX_DELAY);
+        // Use a bounded timeout so Stop()/Start() cycles reliably unblock this
+        // call. portMAX_DELAY can leave the task permanently stuck inside the
+        // AFE if reset_buffer() doesn't wake a blocked fetch.
+        auto res = afe_iface_->fetch_with_delay(afe_data_, pdMS_TO_TICKS(200));
         if ((xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING) == 0) {
             continue;
         }

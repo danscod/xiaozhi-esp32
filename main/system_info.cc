@@ -1,5 +1,6 @@
 #include "system_info.h"
 
+#include <cstring>
 #include <freertos/task.h>
 #include <esp_log.h>
 #include <esp_flash.h>
@@ -153,4 +154,96 @@ void SystemInfo::PrintHeapStats() {
 
 void SystemInfo::PrintPmLocks() {
     esp_pm_dump_locks(stdout);
+}
+
+size_t SystemInfo::CaptureTaskRunTimes(TaskRunTimeEntry* out_entries, size_t max_entries) {
+    if (!out_entries || max_entries == 0) return 0;
+    UBaseType_t n = uxTaskGetNumberOfTasks();
+    if (n == 0) return 0;
+    TaskStatus_t* arr = (TaskStatus_t*)malloc(n * sizeof(TaskStatus_t));
+    if (!arr) return 0;
+    UBaseType_t got = uxTaskGetSystemState(arr, n, nullptr);
+    size_t written = 0;
+    for (UBaseType_t i = 0; i < got && written < max_entries; i++) {
+        const char* name = arr[i].pcTaskName ? arr[i].pcTaskName : "?";
+        // Skip the idle tasks — they're not "work".
+        if (strcmp(name, "IDLE0") == 0 || strcmp(name, "IDLE1") == 0) continue;
+        strncpy(out_entries[written].name, name, sizeof(out_entries[written].name) - 1);
+        out_entries[written].name[sizeof(out_entries[written].name) - 1] = 0;
+        out_entries[written].run_time = arr[i].ulRunTimeCounter;
+        out_entries[written].core     = (int)arr[i].xCoreID;
+        written++;
+    }
+    free(arr);
+    return written;
+}
+
+bool SystemInfo::FindTopTaskByDelta(const TaskRunTimeEntry* start, size_t start_n,
+                                    const TaskRunTimeEntry* end,   size_t end_n,
+                                    char* out_name, size_t name_buf_len,
+                                    uint32_t* out_delta, int* out_core) {
+    if (!start || !end || !out_name || !out_delta || !out_core) return false;
+    uint32_t best_delta = 0;
+    int      best_core  = -1;
+    const char* best_name = nullptr;
+    for (size_t i = 0; i < end_n; i++) {
+        // Find matching name in `start`. Tasks created after start show up
+        // only in `end` — for those, treat start runtime as 0.
+        uint32_t start_rt = 0;
+        for (size_t j = 0; j < start_n; j++) {
+            if (strcmp(start[j].name, end[i].name) == 0) {
+                start_rt = start[j].run_time;
+                break;
+            }
+        }
+        uint32_t end_rt = end[i].run_time;
+        // U32 wrap handling.
+        uint32_t delta = (end_rt >= start_rt) ? (end_rt - start_rt)
+                                              : (uint32_t)(((uint64_t)end_rt + 0x100000000ULL) - start_rt);
+        if (delta > best_delta) {
+            best_delta = delta;
+            best_core  = end[i].core;
+            best_name  = end[i].name;
+        }
+    }
+    if (!best_name) return false;
+    strncpy(out_name, best_name, name_buf_len - 1);
+    out_name[name_buf_len - 1] = 0;
+    *out_delta = best_delta;
+    *out_core  = best_core;
+    return true;
+}
+
+bool SystemInfo::GetCoreCpuStats(CoreCpuStats* out) {
+    if (!out) return false;
+    *out = CoreCpuStats{};
+    UBaseType_t n = uxTaskGetNumberOfTasks();
+    if (n == 0) return false;
+    TaskStatus_t* arr = (TaskStatus_t*)malloc(n * sizeof(TaskStatus_t));
+    if (!arr) return false;
+    uint32_t total_runtime = 0;
+    UBaseType_t got = uxTaskGetSystemState(arr, n, &total_runtime);
+    out->total_runtime = total_runtime;
+    for (UBaseType_t i = 0; i < got; i++) {
+        BaseType_t core = arr[i].xCoreID;
+        uint32_t rt = arr[i].ulRunTimeCounter;
+        // ESP-IDF's idle tasks are named "IDLE0" / "IDLE1".
+        const char* name = arr[i].pcTaskName ? arr[i].pcTaskName : "?";
+        bool is_idle0 = (strcmp(name, "IDLE0") == 0);
+        bool is_idle1 = (strcmp(name, "IDLE1") == 0);
+        if (core == 0)      out->core0_run_time += rt;
+        else if (core == 1) out->core1_run_time += rt;
+        else                out->no_affinity_run_time += rt;
+        if (is_idle0) out->core0_idle_run_time = rt;
+        if (is_idle1) out->core1_idle_run_time = rt;
+        // Track the biggest non-idle task (skip IDLE0/IDLE1 — they're not work).
+        if (!is_idle0 && !is_idle1 && rt > out->top_task_run_time) {
+            out->top_task_run_time = rt;
+            out->top_task_core = (int)core;
+            strncpy(out->top_task_name, name, sizeof(out->top_task_name) - 1);
+            out->top_task_name[sizeof(out->top_task_name) - 1] = 0;
+        }
+    }
+    free(arr);
+    return true;
 }

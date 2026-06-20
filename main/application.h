@@ -141,6 +141,8 @@ private:
     bool aborted_ = false;
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
+    volatile bool vad_speaking_ = false;
+    int64_t listen_start_ms_ = 0;
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
@@ -163,6 +165,12 @@ private:
     // Helper methods
     void CheckAssetsVersion();
     void CheckNewVersion();
+    // Periodic background poll for new firmware. If the device is idle (no
+    // active conversation, no media playback), runs a one-shot OTA check and
+    // upgrades immediately on hit. Started after activation completes.
+    void StartAutoUpdateTimer();
+    void CheckAutoUpdate();
+    esp_timer_handle_t auto_update_timer_ = nullptr;
     void InitializeProtocol();
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);

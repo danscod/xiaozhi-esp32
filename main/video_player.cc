@@ -9,6 +9,7 @@
 #include "display/display.h"
 #include "display/lvgl_display/jpg/jpeg_to_image.h"
 #include "telemetry.h"
+#include "settings.h"
 
 #include <lvgl.h>
 #include <esp_timer.h>
@@ -133,6 +134,60 @@ VideoPlaybackTelemetry VideoPlayer::BuildTelemetrySnapshot(int duration_ms,
     telemetry.audio_output_underrun_count =
         static_cast<int>(playback_stats_.audio_output_underrun_count);
 
+    // Per-core CPU utilization since playback started. We snapshot at
+    // playback start (PlayItem) and again here; the diff over the window
+    // gives % busy per core. Pinning render to core 1 and opus to core 0
+    // makes this an easy way to spot overload (one core at 95%+).
+    if (playback_stats_.cpu_start.valid) {
+        CoreCpuStats end_cpu{};
+        if (SystemInfo::GetCoreCpuStats(&end_cpu)) {
+            // Use unsigned arithmetic to gracefully handle the U32 counter
+            // wrapping (~71 min boundary).
+            auto delta = [](uint64_t end, uint64_t start) -> uint64_t {
+                // 32-bit counter wrap: if end < start, add 2^32.
+                if (end >= start) return end - start;
+                return end + (uint64_t{1} << 32) - start;
+            };
+            uint64_t total_delta = delta(end_cpu.total_runtime,
+                                         playback_stats_.cpu_start.total_runtime);
+            if (total_delta > 0) {
+                uint64_t idle0_delta = delta(end_cpu.core0_idle_run_time,
+                                             playback_stats_.cpu_start.core0_idle_run_time);
+                uint64_t idle1_delta = delta(end_cpu.core1_idle_run_time,
+                                             playback_stats_.cpu_start.core1_idle_run_time);
+                // Busy% per core = 100 - (idle_delta / total_delta * 100).
+                // total_delta is the wall-clock interval; each core has the
+                // same amount of time available.
+                int busy0 = 100 - (int)((idle0_delta * 100) / total_delta);
+                int busy1 = 100 - (int)((idle1_delta * 100) / total_delta);
+                telemetry.cpu_core0_busy_pct = std::max(0, std::min(100, busy0));
+                telemetry.cpu_core1_busy_pct = std::max(0, std::min(100, busy1));
+            }
+            // Top task DURING the playback window (delta of per-task
+            // runtimes vs the snapshot taken at start). Much more
+            // informative than the cumulative-since-boot metric.
+            if (playback_stats_.cpu_start_task_count > 0 && total_delta > 0) {
+                SystemInfo::TaskRunTimeEntry end_tasks[PlaybackStats::kMaxTaskSnapshotEntries];
+                size_t end_n = SystemInfo::CaptureTaskRunTimes(
+                    end_tasks, PlaybackStats::kMaxTaskSnapshotEntries);
+                char     top_name[16] = {0};
+                uint32_t top_delta    = 0;
+                int      top_core     = -1;
+                if (SystemInfo::FindTopTaskByDelta(
+                        playback_stats_.cpu_start_tasks,
+                        playback_stats_.cpu_start_task_count,
+                        end_tasks, end_n,
+                        top_name, sizeof(top_name),
+                        &top_delta, &top_core)) {
+                    telemetry.cpu_top_task_name = top_name;
+                    telemetry.cpu_top_task_core = top_core;
+                    telemetry.cpu_top_task_pct =
+                        (int)((uint64_t(top_delta) * 100) / total_delta);
+                }
+            }
+        }
+    }
+
     auto audio_metrics = Application::GetInstance().GetAudioService().GetPlaybackMetrics();
     telemetry.max_audio_output_write_ms =
         std::max(telemetry.max_audio_output_write_ms, audio_metrics.max_output_write_ms);
@@ -154,6 +209,14 @@ void VideoPlayer::SetPlaybackEndReason(const char* reason) {
 }
 
 void VideoPlayer::MaybePostPlaybackProgress() {
+    // Skip during WebSocket streaming — concurrent telemetry POSTs hit a
+    // use-after-free bug in HttpClient::OnTcpDisconnected (the managed
+    // esp-ml307 component does not synchronize its destructor with the TCP
+    // receive task). The end-of-playback event still fires from MaybeFinishPlayback
+    // which runs after the WS is fully closed.
+    if (use_ws_media_api_) {
+        return;
+    }
     int64_t start_us = 0;
     {
         std::lock_guard<std::mutex> lock(playback_stats_mutex_);
@@ -200,7 +263,30 @@ void VideoPlayer::MaybeFinishPlayback() {
                 ? static_cast<int>((esp_timer_get_time() - start_us) / 1000)
                 : 0;
             VideoPlaybackTelemetry telemetry = BuildTelemetrySnapshot(duration_ms, 0);
-            Telemetry::GetInstance().PostVideoPlaybackStats(telemetry);
+            if (use_ws_media_api_) {
+                // Prefer the persistent telemetry WS (no HttpClient created,
+                // no destructor races, instant delivery). If the WS isn't
+                // currently up, fall back to NVS so the summary is sent on
+                // the next boot. This avoids ever creating an HttpClient in
+                // a heap-fragile post-playback moment.
+                bool sent = Telemetry::GetInstance().TrySendVideoPlaybackStats(telemetry);
+                if (sent) {
+                    ESP_LOGI(TAG, "Playback summary sent via telemetry WS");
+                } else {
+                    Settings s("pbstats", true);
+                    s.SetInt("duration_ms", duration_ms);
+                    s.SetInt("rendered",    telemetry.rendered_frames);
+                    s.SetInt("dropped",     telemetry.dropped_frames);
+                    s.SetInt("audio_pkts",  telemetry.audio_packets_seen);
+                    s.SetInt("video_pkts",  telemetry.video_frames_seen);
+                    s.SetInt("overflow",    telemetry.queue_overflow_drop_count);
+                    s.SetString("end_reason", playback_end_reason_);
+                    s.SetInt("present", 1);
+                    ESP_LOGI(TAG, "Playback stats saved to NVS (WS not up; will send on next boot)");
+                }
+            } else {
+                Telemetry::GetInstance().PostVideoPlaybackStats(telemetry);
+            }
             ESP_LOGI(TAG,
                      "Playback stats: rendered=%d dropped=%d http_calls=%d http_stalls=%d "
                      "decode_attempts=%d decode_failures=%d present=%d max_decode_ms=%d "
@@ -402,6 +488,7 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
     auto* playback_mode_j = cJSON_GetObjectItem(root, "playback_mode");
     auto* sync_frame_url_j = cJSON_GetObjectItem(root, "sync_frame_url");
     auto* sync_audio_url_j = cJSON_GetObjectItem(root, "sync_audio_url");
+    auto* ws_stream_url_j  = cJSON_GetObjectItem(root, "ws_stream_url");
     auto* duration_s_j = cJSON_GetObjectItem(root, "duration_s");
     auto* sync_audio_packet_ms_j = cJSON_GetObjectItem(root, "sync_audio_packet_ms");
     auto* sync_audio_batch_packets_j = cJSON_GetObjectItem(root, "sync_audio_batch_packets");
@@ -413,7 +500,22 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
     }
     std::string saved_title = title_j->valuestring;
     std::string saved_url   = url_j->valuestring;
+    // Prefer WebSocket streaming when offered (one persistent connection,
+    // avoids per-batch HTTP cycle and the http_client mutex contention bug).
+    bool use_ws_media_api = cJSON_IsString(ws_stream_url_j) &&
+                            ws_stream_url_j->valuestring[0] != '\0';
+    std::string saved_ws_stream_url = use_ws_media_api ? ws_stream_url_j->valuestring : "";
+    ESP_LOGI(TAG, "PlayItem '%s': ws_stream_url_j=%p is_str=%d use_ws=%d body_len=%zu",
+             item_id.c_str(),
+             (void*)ws_stream_url_j,
+             ws_stream_url_j ? cJSON_IsString(ws_stream_url_j) : 0,
+             (int)use_ws_media_api,
+             body.size());
+    if (use_ws_media_api) {
+        ESP_LOGI(TAG, "  ws_url=%s", ws_stream_url_j->valuestring);
+    }
     bool use_sync_media_api =
+        !use_ws_media_api &&
         cJSON_IsString(playback_mode_j) &&
         std::string(playback_mode_j->valuestring) == "sync_v1" &&
         cJSON_IsString(sync_frame_url_j) &&
@@ -437,7 +539,9 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
     current_id_    = item_id;
     sync_frame_url_ = saved_sync_frame_url;
     sync_audio_url_ = saved_sync_audio_url;
+    ws_stream_url_  = saved_ws_stream_url;
     use_sync_media_api_ = use_sync_media_api;
+    use_ws_media_api_   = use_ws_media_api;
     current_duration_ms_ = saved_duration_ms;
     sync_audio_packet_ms_ = saved_sync_audio_packet_ms;
     sync_audio_batch_packets_ = saved_sync_audio_batch_packets;
@@ -445,8 +549,9 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
     sync_frame_lead_ms_ = saved_sync_frame_lead_ms;
 
     Application::GetInstance().Schedule([this, saved_url, saved_title, item_id,
-                                         use_sync_media_api, saved_sync_frame_url,
-                                         saved_sync_audio_url, saved_duration_ms,
+                                         use_sync_media_api, use_ws_media_api,
+                                         saved_sync_frame_url, saved_sync_audio_url,
+                                         saved_ws_stream_url, saved_duration_ms,
                                          saved_sync_audio_packet_ms,
                                          saved_sync_audio_batch_packets,
                                          saved_sync_video_batch_frames,
@@ -462,7 +567,9 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
         stream_url_    = saved_url;
         sync_frame_url_ = saved_sync_frame_url;
         sync_audio_url_ = saved_sync_audio_url;
+        ws_stream_url_  = saved_ws_stream_url;
         use_sync_media_api_ = use_sync_media_api;
+        use_ws_media_api_   = use_ws_media_api;
         current_duration_ms_ = saved_duration_ms;
         sync_audio_packet_ms_ = saved_sync_audio_packet_ms;
         sync_audio_batch_packets_ = saved_sync_audio_batch_packets;
@@ -478,6 +585,21 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
             playback_stats_ = {};
             playback_stats_.start_us = esp_timer_get_time();
             playback_end_reason_ = "in_progress";
+            // CPU snapshot at playback start. The end-of-playback summary
+            // diffs against this to compute per-core busy % AND the single
+            // top CPU consumer over the playback window.
+            CoreCpuStats start_cpu{};
+            if (SystemInfo::GetCoreCpuStats(&start_cpu)) {
+                playback_stats_.cpu_start.valid               = true;
+                playback_stats_.cpu_start.total_runtime       = start_cpu.total_runtime;
+                playback_stats_.cpu_start.core0_run_time      = start_cpu.core0_run_time;
+                playback_stats_.cpu_start.core1_run_time      = start_cpu.core1_run_time;
+                playback_stats_.cpu_start.core0_idle_run_time = start_cpu.core0_idle_run_time;
+                playback_stats_.cpu_start.core1_idle_run_time = start_cpu.core1_idle_run_time;
+            }
+            playback_stats_.cpu_start_task_count = SystemInfo::CaptureTaskRunTimes(
+                playback_stats_.cpu_start_tasks,
+                PlaybackStats::kMaxTaskSnapshotEntries);
         }
         playback_stats_reported_ = false;
         last_progress_post_us_.store(0);
@@ -488,9 +610,13 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
         stream_task_handle_ = nullptr;
         render_task_handle_ = nullptr;
 
-        BaseType_t stream_task_ok = xTaskCreate(StreamReaderTask, "video_stream",
-                                                kStreamTaskStackWords, this, 4,
-                                                &stream_task_handle_);
+        // Stream task on core 0 alongside the network stack. With the WS
+        // OnData callback now doing all parsing & dispatch on the tcp_receive
+        // task, this task mostly just sleeps waiting for ws_done.
+        BaseType_t stream_task_ok = xTaskCreatePinnedToCore(
+                                        StreamReaderTask, "video_stream",
+                                        kStreamTaskStackWords, this, 3,
+                                        &stream_task_handle_, 0);
         if (stream_task_ok != pdPASS || stream_task_handle_ == nullptr) {
             ESP_LOGE(TAG, "Failed to create video stream task");
             state_ = State::kError;
@@ -505,9 +631,14 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
         }
 
         if (!use_sync_media_api_) {
-            BaseType_t render_task_ok = xTaskCreate(VideoRenderTask, "video_render",
-                                                    kRenderTaskStackWords, this, 2,
-                                                    &render_task_handle_);
+            // Render task pinned to core 1: isolated from Wi-Fi/TCP work
+            // (which are on core 0). JPEG decode + LCD push are the heaviest
+            // CPU loads; giving them a dedicated core removes contention
+            // with the network receive path.
+            BaseType_t render_task_ok = xTaskCreatePinnedToCore(
+                                            VideoRenderTask, "video_render",
+                                            kRenderTaskStackWords, this, 3,
+                                            &render_task_handle_, 1);
             if (render_task_ok != pdPASS || render_task_handle_ == nullptr) {
                 ESP_LOGE(TAG, "Failed to create video render task");
                 state_ = State::kError;
@@ -574,7 +705,9 @@ void VideoPlayer::StopPlayback() {
     stream_url_    = "";
     sync_frame_url_ = "";
     sync_audio_url_ = "";
+    ws_stream_url_  = "";
     use_sync_media_api_ = false;
+    use_ws_media_api_   = false;
     current_duration_ms_ = 0;
     sync_audio_packet_ms_ = 60;
     sync_audio_batch_packets_ = 96;
@@ -667,6 +800,219 @@ void VideoPlayer::StreamReaderTask(void* arg) {
 
     if (self->stop_requested_.load()) {
         self->stream_task_handle_ = nullptr;
+        self->MaybeFinishPlayback();
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // ── WebSocket streaming (ws_v1) ─────────────────────────────────────────
+    // Single persistent connection. Server pushes interleaved binary frames:
+    //   [1B type][4B ts_ms BE][payload]
+    //   type 0x01 = video JPEG, 0x02 = opus audio packet
+    // Text control frames: {"type":"hello"|"eos"|"error"}
+    //
+    // Parsing & dispatch happens DIRECTLY in the WS OnData callback (which
+    // runs on the tcp_receive task). Audio push is blocking — when the
+    // decode queue fills, the WS callback blocks, kernel TCP buffer fills,
+    // server sees a zero-window and naturally stops sending. This is real
+    // TCP backpressure with zero data loss.
+    //
+    // (Previous design used an intermediate raw_queue drained by this task.
+    // That auto-dropped the OLDEST frames on overflow, which silently
+    // discarded data whenever audio push blocked even briefly. Eliminating
+    // the intermediate queue removes the silent-drop point and lets TCP
+    // do its job.)
+    if (self->use_ws_media_api_) {
+        auto& audio = Application::GetInstance().GetAudioService();
+        audio.EnableWakeWordDetection(false);
+
+        auto network = Board::GetInstance().GetNetwork();
+        auto ws = network->CreateWebSocket(2);
+        if (!ws) {
+            ESP_LOGE(TAG, "WS: CreateWebSocket failed");
+            self->SetPlaybackEndReason("ws_create_failed");
+            std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+            self->reader_done_.store(true);
+            self->playback_started_.store(true);
+            self->stream_task_handle_ = nullptr;
+            self->video_queue_cv_.notify_all();
+            self->MaybeFinishPlayback();
+            vTaskDelete(nullptr);
+            return;
+        }
+
+        ws->SetHeader("User-Agent", SystemInfo::GetUserAgent().c_str());
+        ws->SetHeader("Device-Id",  SystemInfo::GetMacAddress().c_str());
+
+        std::atomic<bool> ws_done{false};
+        std::atomic<bool> ws_error{false};
+        std::atomic<size_t> ws_queued_frames{0};
+        std::atomic<bool>   playback_anchor_set{false};
+        std::atomic<size_t> audio_packets_buffered{0};
+
+        ws->OnData([&](const char* data, size_t len, bool binary) {
+            if (self->stop_requested_.load()) return;
+
+            if (!binary) {
+                cJSON* root = cJSON_ParseWithLength(data, len);
+                if (!root) return;
+                auto* type_j = cJSON_GetObjectItem(root, "type");
+                if (cJSON_IsString(type_j)) {
+                    if (strcmp(type_j->valuestring, "eos") == 0) {
+                        ws_done.store(true);
+                    } else if (strcmp(type_j->valuestring, "error") == 0) {
+                        ws_error.store(true);
+                        ws_done.store(true);
+                    }
+                }
+                cJSON_Delete(root);
+                return;
+            }
+
+            if (len < 5) return;
+            const uint8_t* d = reinterpret_cast<const uint8_t*>(data);
+            uint8_t type = d[0];
+            uint32_t ts_ms = (static_cast<uint32_t>(d[1]) << 24) |
+                             (static_cast<uint32_t>(d[2]) << 16) |
+                             (static_cast<uint32_t>(d[3]) << 8)  |
+                             (static_cast<uint32_t>(d[4]));
+            const uint8_t* payload = d + 5;
+            size_t payload_len = len - 5;
+            int64_t now_us = esp_timer_get_time();
+
+            if (type == 0x01) {
+                auto frame = std::make_unique<QueuedVideoFrame>();
+                frame->ts_ms = ts_ms;
+                frame->jpeg.assign(payload, payload + payload_len);
+                int queue_depth = 0;
+                bool queue_overflow = false;
+                {
+                    std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+                    if (self->video_queue_.size() >= kMaxQueuedVideoFrames) {
+                        self->video_queue_.pop_front();
+                        self->dropped_frames_++;
+                        queue_overflow = true;
+                    }
+                    self->video_queue_.push_back(std::move(frame));
+                    queue_depth = static_cast<int>(self->video_queue_.size());
+                    self->video_queue_cv_.notify_all();
+                }
+                {
+                    std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+                    self->playback_stats_.video_frames_seen++;
+                    self->playback_stats_.video_bytes_seen += payload_len;
+                    self->playback_stats_.max_queued_video_frames =
+                        std::max(self->playback_stats_.max_queued_video_frames,
+                                 static_cast<size_t>(queue_depth));
+                    if (queue_overflow) self->playback_stats_.queue_overflow_drop_count++;
+                    self->playback_stats_.dropped_frames = self->dropped_frames_;
+                    if (self->playback_stats_.first_video_frame_us == 0 &&
+                        self->playback_stats_.start_us > 0) {
+                        self->playback_stats_.first_video_frame_us =
+                            now_us - self->playback_stats_.start_us;
+                    }
+                }
+                ws_queued_frames++;
+            } else if (type == 0x02) {
+                auto packet = std::make_unique<AudioStreamPacket>();
+                packet->sample_rate    = 24000;
+                packet->frame_duration = 60;
+                packet->timestamp      = ts_ms;
+                packet->payload.assign(payload, payload + payload_len);
+                // BLOCKING push: this is where TCP backpressure happens.
+                // When the decode queue is full, this WS callback blocks,
+                // the kernel TCP buffer fills (~24 KB), server gets a
+                // zero-window ACK and pauses. No data loss.
+                audio.PushPacketToDecodeQueue(std::move(packet), true);
+
+                bool playback_started_now = false;
+                {
+                    std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+                    if (!playback_anchor_set.load()) {
+                        self->playback_start_us_ = now_us - (static_cast<int64_t>(ts_ms) * 1000);
+                        playback_anchor_set.store(true);
+                    }
+                    if (!self->playback_started_.load()) {
+                        size_t buffered = audio_packets_buffered.fetch_add(1) + 1;
+                        constexpr size_t kWsAudioPrebufferPackets = 50;  // 50*60ms = 3.0s
+                        constexpr size_t kWsVideoPrebufferFrames  = 20;  // ~2.5s at 8fps
+                        if (buffered >= kWsAudioPrebufferPackets &&
+                            self->video_queue_.size() >= kWsVideoPrebufferFrames) {
+                            self->playback_started_.store(true);
+                            playback_started_now = true;
+                            self->video_queue_cv_.notify_all();
+                        }
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+                    self->playback_stats_.audio_packets_seen++;
+                    self->playback_stats_.audio_bytes_seen += payload_len;
+                    if (self->playback_stats_.first_audio_packet_us == 0 &&
+                        self->playback_stats_.start_us > 0) {
+                        self->playback_stats_.first_audio_packet_us =
+                            now_us - self->playback_stats_.start_us;
+                    }
+                    if (playback_started_now &&
+                        self->playback_stats_.playback_started_us == 0 &&
+                        self->playback_stats_.start_us > 0) {
+                        self->playback_stats_.playback_started_us =
+                            now_us - self->playback_stats_.start_us;
+                    }
+                }
+            }
+        });
+
+        ws->OnDisconnected([&]() {
+            ws_done.store(true);
+        });
+
+        ESP_LOGI(TAG, "WS streaming from %s", self->ws_stream_url_.c_str());
+        int64_t connect_start_us = esp_timer_get_time();
+        bool connected = ws->Connect(self->ws_stream_url_.c_str());
+        int64_t connect_elapsed_us = esp_timer_get_time() - connect_start_us;
+        {
+            std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+            self->playback_stats_.http_open_time_us = connect_elapsed_us;
+        }
+        if (!connected) {
+            ESP_LOGE(TAG, "WS connect failed err=%d", ws->GetLastError());
+            self->SetPlaybackEndReason("ws_connect_failed");
+            ws_error.store(true);
+            ws_done.store(true);
+        }
+
+        // Stream task just waits for done/stop. Parsing & dispatch happens
+        // in the WS OnData callback above (on the tcp_receive task).
+        while (!self->stop_requested_.load() && !ws_done.load()) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+        ws->Close();
+        ws.reset();
+
+        if (!self->stop_requested_.load() && !ws_error.load()) {
+            std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+            if (self->playback_end_reason_.empty() || self->playback_end_reason_ == "in_progress") {
+                self->playback_end_reason_ = "ws_eos";
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+            self->reader_done_.store(true);
+            if (!self->playback_started_.load()) {
+                self->playback_started_.store(true);
+            }
+            self->stream_task_handle_ = nullptr;
+            self->video_queue_cv_.notify_all();
+        }
+        ESP_LOGI(TAG, "WS stream done: queued=%zu dropped=%zu stopped=%d",
+                 static_cast<size_t>(ws_queued_frames.load()), self->dropped_frames_,
+                 static_cast<int>(self->stop_requested_.load()));
+        {
+            std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
+            self->playback_stats_.dropped_frames = self->dropped_frames_;
+        }
         self->MaybeFinishPlayback();
         vTaskDelete(nullptr);
         return;
@@ -1827,6 +2173,10 @@ void VideoPlayer::VideoRenderTask(void* arg) {
 
     bool screen_created = false;
     size_t rendered_frames = 0;
+    // Stall-resync: if no frame has been rendered for kRenderStallResyncUs,
+    // assume audio_clock has drifted past the queued frames (WS hiccup, decoder
+    // catch-up, etc.) and force-render the newest frame instead of waiting.
+    int64_t last_present_us = 0;
 
     while (!self->stop_requested_.load()) {
         while (self->paused_.load() && !self->stop_requested_.load()) {
@@ -1877,20 +2227,47 @@ void VideoPlayer::VideoRenderTask(void* arg) {
 
             audio_clock_ms = audio_service.GetPlaybackPositionMs();
             if (audio_clock_ms < 0) {
-                future_wait_us = 5000;
+                // Audio playback not yet running — wait briefly. Release the
+                // lock first (same spin-loop bug fix as below).
+                lock.unlock();
+                vTaskDelay(pdMS_TO_TICKS(5));
                 continue;
             }
 
-            while (!self->video_queue_.empty()) {
-                int64_t front_timestamp_us =
-                    static_cast<int64_t>(self->video_queue_.front()->ts_ms) * 1000;
-                if (front_timestamp_us + kLateFrameDropUs < (audio_clock_ms * 1000)) {
+            // STALL-RESYNC: if we've been stuck for kRenderStallResyncUs (1.5s)
+            // with no successful render, drop the entire queue except the newest
+            // frame and force-render that one. This unblocks the "video frozen,
+            // audio continued" case the user observed.
+            int64_t stall_now_us = esp_timer_get_time();
+            if (last_present_us > 0 &&
+                (stall_now_us - last_present_us) > kRenderStallResyncUs &&
+                !self->video_queue_.empty()) {
+                size_t popped = self->video_queue_.size() - 1;
+                while (self->video_queue_.size() > 1) {
                     self->video_queue_.pop_front();
-                    backlog_drops++;
                     self->dropped_frames_++;
-                    continue;
                 }
-                break;
+                backlog_drops += static_cast<int>(popped);
+                ESP_LOGW(TAG, "Render stalled %lld ms — resync, dropped %zu frames",
+                         (long long)((stall_now_us - last_present_us) / 1000), popped);
+                // Anchor audio_clock to the surviving frame so the selector
+                // picks it (it's "future" from the previous audio_clock but we
+                // want it rendered NOW).
+                audio_clock_ms =
+                    static_cast<int64_t>(self->video_queue_.front()->ts_ms) -
+                    (kResyncLeadUs / 1000);
+            } else {
+                while (!self->video_queue_.empty()) {
+                    int64_t front_timestamp_us =
+                        static_cast<int64_t>(self->video_queue_.front()->ts_ms) * 1000;
+                    if (front_timestamp_us + kLateFrameDropUs < (audio_clock_ms * 1000)) {
+                        self->video_queue_.pop_front();
+                        backlog_drops++;
+                        self->dropped_frames_++;
+                        continue;
+                    }
+                    break;
+                }
             }
             if (self->video_queue_.empty()) {
                 {
@@ -1932,7 +2309,17 @@ void VideoPlayer::VideoRenderTask(void* arg) {
                     self->playback_stats_.max_render_schedule_sleep_us =
                         std::max(self->playback_stats_.max_render_schedule_sleep_us, future_wait_us);
                 }
-                // Leave the queue intact; the front frame is still too far in the future.
+                // SLEEP HERE before continue — the outer-loop vTaskDelay below
+                // is unreachable from this branch (continue jumps over it),
+                // which previously left this code in a tight spin loop on
+                // core 1 burning ~30k spins/sec when frames were not yet
+                // due to render. Release the lock first so producer (WS
+                // OnData) isn't blocked on us while we wait.
+                lock.unlock();
+                if (future_wait_us > 0) {
+                    TickType_t delay_ticks = DelayTicksForUs(future_wait_us);
+                    if (delay_ticks > 0) vTaskDelay(delay_ticks);
+                }
                 continue;
             }
 
@@ -1950,13 +2337,10 @@ void VideoPlayer::VideoRenderTask(void* arg) {
             self->playback_stats_.render_backlog_drop_count += backlog_drops;
             self->playback_stats_.dropped_frames = self->dropped_frames_;
         }
-        if (future_wait_us > 0) {
-            TickType_t delay_ticks = DelayTicksForUs(future_wait_us);
-            if (delay_ticks > 0) {
-                vTaskDelay(delay_ticks);
-            }
-            continue;
-        }
+        // Note: a previous branch (selected_index < 0) sleeps inline before
+        // `continue`. When we reach here, a frame WAS selected and we just
+        // popped it from the queue under lock — proceed straight to decode
+        // and present.
 
         if (!screen_created) {
             auto* display = Board::GetInstance().GetDisplay();
@@ -2019,6 +2403,7 @@ void VideoPlayer::VideoRenderTask(void* arg) {
         }
         int64_t age_after_present_us = std::max<int64_t>(0, (audio_after_present_ms * 1000) - frame_timestamp_us);
         if (frame_presented) {
+            last_present_us = presented_at_us;  // for stall-resync detection
             rendered_frames++;
             std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
             self->playback_stats_.frame_present_time_us_total += present_elapsed_us;

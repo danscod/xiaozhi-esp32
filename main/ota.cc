@@ -210,6 +210,45 @@ esp_err_t Ota::CheckVersion() {
         ESP_LOGW(TAG, "No server_time section found!");
     }
 
+    // ws_base_url: server can move public IPs without an OTA push. We cache
+    // the value in NVS (namespace "net", key "ws_base") and Telemetry reads
+    // it on every connect. Used by:
+    //   - Telemetry persistent WS
+    //   - Video media WS (the server includes the same base in chat replies;
+    //     this cache is the fallback if a stale chat URL is in flight).
+    cJSON *ws_base_url = cJSON_GetObjectItem(root, "ws_base_url");
+    if (cJSON_IsString(ws_base_url) && ws_base_url->valuestring[0] != '\0') {
+        Settings net_settings("net", true);
+        std::string existing = net_settings.GetString("ws_base", "");
+        if (existing != ws_base_url->valuestring) {
+            net_settings.SetString("ws_base", ws_base_url->valuestring);
+            ESP_LOGI(TAG, "Saved new ws_base_url: %s (was: %s)",
+                     ws_base_url->valuestring, existing.c_str());
+        }
+    }
+
+    // assets: server can ship a new SPIFFS assets blob (sounds, fonts,
+    // emoji, WAD, etc.) independently of the firmware. If the announced
+    // version differs from what's installed, stash the URL in the
+    // "assets" Settings namespace under "download_url"; application.cc
+    // sees that on next boot and calls Assets::Download().
+    cJSON *assets_section = cJSON_GetObjectItem(root, "assets");
+    if (cJSON_IsObject(assets_section)) {
+        cJSON *a_ver = cJSON_GetObjectItem(assets_section, "version");
+        cJSON *a_url = cJSON_GetObjectItem(assets_section, "url");
+        if (cJSON_IsString(a_ver) && cJSON_IsString(a_url) &&
+            a_ver->valuestring[0] != '\0' && a_url->valuestring[0] != '\0') {
+            Settings asset_settings("assets", true);
+            std::string installed = asset_settings.GetString("version", "");
+            if (installed != a_ver->valuestring) {
+                asset_settings.SetString("download_url", a_url->valuestring);
+                asset_settings.SetString("pending_version", a_ver->valuestring);
+                ESP_LOGI(TAG, "Queued assets download v%s -> %s (installed: %s)",
+                         a_ver->valuestring, a_url->valuestring, installed.c_str());
+            }
+        }
+    }
+
     has_new_version_ = false;
     cJSON *firmware = cJSON_GetObjectItem(root, "firmware");
     if (cJSON_IsObject(firmware)) {
@@ -279,6 +318,9 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
 
     auto network = Board::GetInstance().GetNetwork();
     auto http = network->CreateHttp(0);
+    // Default timeout is 30s which is insufficient for a 2.8MB binary over WiFi.
+    // At typical ESP32 HTTPS speeds (~20-50 KB/s), the download takes 60-150s.
+    http->SetTimeout(300000);  // 5 minutes
     if (!http->Open("GET", firmware_url)) {
         ESP_LOGE(TAG, "Failed to open HTTP connection");
         return false;

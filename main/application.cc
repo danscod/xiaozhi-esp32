@@ -15,6 +15,7 @@
 
 #include <cstring>
 #include <esp_log.h>
+#include <esp_app_desc.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
@@ -84,6 +85,7 @@ void Application::Initialize() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
     };
     callbacks.on_vad_change = [this](bool speaking) {
+        vad_speaking_ = speaking;
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
     audio_service_.SetCallbacks(callbacks);
@@ -233,9 +235,21 @@ void Application::Run() {
         }
 
         if (bits & MAIN_EVENT_VAD_CHANGE) {
+            bool speaking = vad_speaking_;
             if (GetDeviceState() == kDeviceStateListening) {
                 auto led = Board::GetInstance().GetLed();
                 led->OnStateChanged();
+                // In auto-stop mode, send listen stop when the user finishes speaking.
+                // Guard: ignore VAD silence events within the first 500ms of
+                // listening — AFE initialization produces a brief noise spike
+                // (VAD_SPEECH then immediately VAD_SILENCE) that would otherwise
+                // trigger an immediate stop before the user has spoken.
+                if (!speaking && listening_mode_ == kListeningModeAutoStop) {
+                    int64_t now_ms = esp_timer_get_time() / 1000;
+                    if (now_ms - listen_start_ms_ >= 1500) {
+                        HandleStopListeningEvent();
+                    }
+                }
             }
         }
 
@@ -323,17 +337,76 @@ void Application::HandleActivationDoneEvent() {
         // Play the success sound to indicate the device is ready
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
     });
+
+    // Start the auto-update poll so the device picks up new firmware
+    // without the user having to power-cycle.
+    StartAutoUpdateTimer();
+}
+
+void Application::StartAutoUpdateTimer() {
+    if (auto_update_timer_) return;
+    esp_timer_create_args_t args = {};
+    args.callback = [](void* arg) {
+        auto* self = static_cast<Application*>(arg);
+        // Skip outright if obviously not idle (cheap check on timer task).
+        if (self->GetDeviceState() != kDeviceStateIdle) return;
+        if (self->IsMediaPlaybackActive()) return;
+        // CheckVersion does a blocking HTTPS POST — must NOT run on the
+        // shared esp_timer task. Spawn a one-shot worker.
+        xTaskCreate([](void* arg) {
+            static_cast<Application*>(arg)->CheckAutoUpdate();
+            vTaskDelete(nullptr);
+        }, "auto_update", 4096, self, 1, nullptr);
+    };
+    args.arg = this;
+    args.dispatch_method = ESP_TIMER_TASK;
+    args.name = "auto_update_tick";
+    esp_timer_create(&args, &auto_update_timer_);
+    // Every 60 seconds. Aggressive, but the device idles for long stretches
+    // and we want pushed firmware to land within a minute. Guarded against
+    // running during conversation or playback by the callback's idle checks.
+    esp_timer_start_periodic(auto_update_timer_, 60ULL * 1000000ULL);
+    ESP_LOGI(TAG, "Auto-update poll started (every 60s when idle)");
+}
+
+void Application::CheckAutoUpdate() {
+    // Re-check idle state just before doing work — state could have changed
+    // between the timer fire and the worker task running.
+    if (GetDeviceState() != kDeviceStateIdle) return;
+    if (IsMediaPlaybackActive()) return;
+    Ota check;
+    if (check.CheckVersion() != ESP_OK) {
+        ESP_LOGW(TAG, "Auto-update CheckVersion failed");
+        return;
+    }
+    if (!check.HasNewVersion()) {
+        ESP_LOGD(TAG, "Auto-update: no new version");
+        return;
+    }
+    // One last idle check before pulling the trigger — we don't want to
+    // start an OTA download in the middle of a conversation that began
+    // during the version check.
+    if (GetDeviceState() != kDeviceStateIdle || IsMediaPlaybackActive()) {
+        ESP_LOGI(TAG, "Auto-update: device no longer idle, deferring");
+        return;
+    }
+    ESP_LOGI(TAG, "Auto-update: new version %s available — upgrading",
+             check.GetFirmwareVersion().c_str());
+    // UpgradeFirmware reboots on success and never returns.
+    UpgradeFirmware(check.GetFirmwareUrl(), check.GetFirmwareVersion());
 }
 
 void Application::ActivationTask() {
     // Create OTA object for activation process
     ota_ = std::make_unique<Ota>();
 
+    // Check for new firmware version FIRST so the OTA response can also
+    // write a pending assets download_url that CheckAssetsVersion picks up
+    // in the same boot (avoids needing an extra reboot to apply assets).
+    CheckNewVersion();
+
     // Check for new assets version
     CheckAssetsVersion();
-
-    // Check for new firmware version
-    CheckNewVersion();
 
     // Initialize the protocol
     InitializeProtocol();
@@ -361,6 +434,7 @@ void Application::CheckAssetsVersion() {
     Settings settings("assets", true);
     // Check if there is a new assets need to be downloaded
     std::string download_url = settings.GetString("download_url");
+    std::string pending_version = settings.GetString("pending_version");
 
     if (!download_url.empty()) {
         settings.EraseKey("download_url");
@@ -391,6 +465,15 @@ void Application::CheckAssetsVersion() {
             vTaskDelay(pdMS_TO_TICKS(2000));
             SetDeviceState(kDeviceStateActivating);
             return;
+        }
+
+        // Persist the now-installed version so ota.cc doesn't re-queue the
+        // same download on every boot. Skip if no pending_version was set
+        // (e.g. download_url written by some other path).
+        if (!pending_version.empty()) {
+            settings.SetString("version", pending_version);
+            settings.EraseKey("pending_version");
+            ESP_LOGI(TAG, "Assets installed: version %s", pending_version.c_str());
         }
     }
 
@@ -745,7 +828,14 @@ void Application::HandleToggleChatEvent() {
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
     } else if (state == kDeviceStateListening) {
-        protocol_->CloseAudioChannel();
+        // Ignore toggle events that arrive within 500ms of entering listening
+        // mode — that's the button-release half of the same physical press
+        // that started listening. A deliberate second press to cancel comes later.
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        if (now_ms - listen_start_ms_ < 500) {
+            return;
+        }
+        HandleStopListeningEvent();
     }
 }
 
@@ -756,9 +846,26 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     }
 
     if (!protocol_->IsAudioChannelOpened()) {
-        if (!protocol_->OpenAudioChannel()) {
+        // Pause the AFE pipeline (wake word + voice processing) during the
+        // WS handshake — it holds 15-30 KB of internal SRAM in feed/output
+        // ringbuffers and a still-running detection task, which would
+        // otherwise starve the receive task that needs to parse the 101
+        // Switching Protocols response. The hello/listening path needs voice
+        // processing back on; wake word stays off (we're in active chat).
+        audio_service_.EnableVoiceProcessing(false);
+        audio_service_.EnableWakeWordDetection(false);
+
+        bool opened = protocol_->OpenAudioChannel();
+
+        if (!opened) {
+            // Connect failed — restore the idle pipeline so wake-word still
+            // works.
+            audio_service_.EnableVoiceProcessing(true);
+            audio_service_.EnableWakeWordDetection(true);
             return;
         }
+        // Connected — bring voice processing back so we can capture user audio.
+        audio_service_.EnableVoiceProcessing(true);
     }
 
     SetListeningMode(mode);
@@ -866,10 +973,20 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     }
 
     if (!protocol_->IsAudioChannelOpened()) {
-        if (!protocol_->OpenAudioChannel()) {
+        // Same AFE-pause as ContinueOpenAudioChannel — frees ~15-30 KB of
+        // internal SRAM during the WS handshake. Wake word detection was
+        // already turned off by the wake-word handler; we additionally
+        // pause voice processing here for the handshake window.
+        audio_service_.EnableVoiceProcessing(false);
+
+        bool opened = protocol_->OpenAudioChannel();
+
+        if (!opened) {
+            audio_service_.EnableVoiceProcessing(true);
             audio_service_.EnableWakeWordDetection(true);
             return;
         }
+        audio_service_.EnableVoiceProcessing(true);
     }
 
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
@@ -919,10 +1036,16 @@ void Application::HandleStateChangedEvent() {
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
-            display->SetChatMessage("system",
-                "\xe2\x97\x8f press   start listening\n"
-                "\xe2\x97\x8f hold    WiFi setup\n"
-                "\xe2\x97\x8f slide O-btn  power off");
+            {
+                char standby_msg[200];
+                snprintf(standby_msg, sizeof(standby_msg),
+                    "\xe2\x97\x8f press   start listening\n"
+                    "\xe2\x97\x8f hold    WiFi setup\n"
+                    "\xe2\x97\x8f slide O-btn  power off\n"
+                    "fw %s",
+                    esp_app_get_description()->version);
+                display->SetChatMessage("system", standby_msg);
+            }
             audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
@@ -939,11 +1062,10 @@ void Application::HandleStateChangedEvent() {
                 "\xe2\x97\x8f play music\n"
                 "\xe2\x97\x8f play a video");
 
-            // Make sure the audio processor is running, but not if video/media is actively
-            // playing — a state transition during playback (e.g. from acoustic wake-word
-            // feedback) must not flush the audio decode queue or start voice capture.
-            if ((play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) &&
-                VideoPlayer::GetInstance().GetState() == VideoPlayer::State::kIdle &&
+            // Always notify the server we're listening, but not during active media playback.
+            // Only restart voice processing if it isn't already running (button-press path
+            // starts it in ContinueOpenAudioChannel) or if a fresh start is needed.
+            if (VideoPlayer::GetInstance().GetState() == VideoPlayer::State::kIdle &&
                 MediaPlayer::GetInstance().GetState() == MediaPlayer::State::kIdle) {
                 // For auto mode, wait for playback queue to be empty before enabling voice processing
                 // This prevents audio truncation when STOP arrives late due to network jitter
@@ -953,7 +1075,9 @@ void Application::HandleStateChangedEvent() {
 
                 // Send the start listening command
                 protocol_->SendStartListening(listening_mode_);
-                audio_service_.EnableVoiceProcessing(true);
+                if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
+                    audio_service_.EnableVoiceProcessing(true);
+                }
             }
 
 #ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
@@ -1011,6 +1135,7 @@ void Application::AbortSpeaking(AbortReason reason) {
 
 void Application::SetListeningMode(ListeningMode mode) {
     listening_mode_ = mode;
+    listen_start_ms_ = esp_timer_get_time() / 1000;
     SetDeviceState(kDeviceStateListening);
 }
 

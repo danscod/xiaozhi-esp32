@@ -36,6 +36,7 @@ set(SOURCES "audio/audio_codec.cc"
             "media_player.cc"
             "flappy_bird.cc"
             "video_player.cc"
+            "doom_player.cc"
             "ota.cc"
             "settings.cc"
             "device_state_machine.cc"
@@ -684,6 +685,10 @@ elseif(CONFIG_BOARD_TYPE_ZHENGCHEN_1_54TFT_WIFI_BITCRAFT)
     set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
+    # DOOM WAD lives in the assets partition. The build picks up any files
+    # under boards/.../assets/ and bakes them into generated_assets.bin via
+    # the extra_files pipeline; DoomPlayer fetches by name at runtime.
+    set(DEFAULT_ASSETS_EXTRA_FILES "${CMAKE_CURRENT_SOURCE_DIR}/boards/zhengchen-1.54tft-wifi-bitcraft/assets")
 elseif(CONFIG_BOARD_TYPE_ZHENGCHEN_1_54TFT_WIFI)
     set(BOARD_TYPE "zhengchen-1.54tft-wifi")
     set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
@@ -950,6 +955,7 @@ idf_component_register(SRCS ${SOURCES}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES
+                        espcoredump
                         esp_pm
                         esp_psram
                         esp_netif
@@ -967,6 +973,7 @@ idf_component_register(SRCS ${SOURCES}
                         efuse
                         bt
                         fatfs
+                        prboom-esp32-compat
                     )
 
 # Use target_compile_definitions to define BOARD_TYPE, BOARD_NAME

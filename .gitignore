@@ -18,3 +18,11 @@ main/mmap_generate_emoji.h
 *.bin
 mmap_generate_*.h
 .clangd
+
+# Host/IDE manager config (machine-specific Windows paths)
+eim_config.toml
+# Local test media (large; not for the repo)
+videos/
+# DOOM WAD — build input baked into the assets partition, kept local
+# like components/ (the prboom engine). Provide doom1.wad locally to build.
+*.wad

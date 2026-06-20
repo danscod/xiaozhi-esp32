@@ -70,14 +70,13 @@ with tempfile.TemporaryDirectory() as tmpdir:
     # Flash the NVS partition
     print(f'Flashing NVS to device at offset 0x{NVS_OFFSET:x}...')
     print('Make sure device is in download mode (hold BOOT + power cycle)!')
-    input('Press Enter when ready...')
 
     r = subprocess.run([
         python, '-m', 'esptool',
         '--chip', 'esp32s3',
         '--port', PORT,
         '--baud', str(BAUD),
-        '--before', 'no-reset',
+        '--before', 'default_reset',
         'write_flash',
         f'0x{NVS_OFFSET:x}', bin_path
     ], env=env)

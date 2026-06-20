@@ -12,6 +12,8 @@
 #include <esp_log.h>
 #include <esp_pm.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <chrono>
 
@@ -40,6 +42,13 @@ public:
     virtual Theme* GetTheme() { return current_theme_; }
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
+    virtual bool PresentVideoFrameRGB565(const uint8_t* data, size_t data_len, size_t width, size_t height, size_t stride) {
+        return false;
+    }
+    // Return the underlying esp_lcd_panel_handle_t as a void* so callers
+    // (e.g. DoomPlayer) can hand it to non-LVGL renderers. NULL when the
+    // display has no direct panel (NoDisplay, future eink, etc.).
+    virtual void* GetPanelHandle() { return nullptr; }
     virtual void SetupUI() { 
         setup_ui_called_ = true;
     }

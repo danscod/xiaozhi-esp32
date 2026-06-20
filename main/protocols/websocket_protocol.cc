@@ -5,8 +5,10 @@
 #include "settings.h"
 
 #include <cstring>
+#include <cstdio>
 #include <cJSON.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <arpa/inet.h>
 #include "assets/lang_config.h"
 
@@ -180,10 +182,19 @@ bool WebsocketProtocol::OpenAudioChannel() {
     }
 
     // Send hello message to describe the client
+    ESP_LOGI(TAG, "WS connected, free internal heap before hello: %lu bytes",
+             (unsigned long)esp_get_free_internal_heap_size());
     auto message = GetHelloMessage();
+    if (message.empty()) {
+        ESP_LOGE(TAG, "Failed to build hello message (OOM?)");
+        SetError(Lang::Strings::SERVER_ERROR);
+        return false;
+    }
+    ESP_LOGI(TAG, "Sending hello (%zu bytes)", message.size());
     if (!SendText(message)) {
         return false;
     }
+    ESP_LOGI(TAG, "Hello sent, waiting for server hello...");
 
     // Wait for server hello
     EventBits_t bits = xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
@@ -201,28 +212,23 @@ bool WebsocketProtocol::OpenAudioChannel() {
 }
 
 std::string WebsocketProtocol::GetHelloMessage() {
-    // keys: message type, version, audio_params (format, sample_rate, channels)
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "type", "hello");
-    cJSON_AddNumberToObject(root, "version", version_);
-    cJSON* features = cJSON_CreateObject();
+    char buf[256];
 #if CONFIG_USE_SERVER_AEC
-    cJSON_AddBoolToObject(features, "aec", true);
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"hello\",\"version\":%d,\"transport\":\"websocket\","
+        "\"audio_params\":{\"format\":\"opus\",\"sample_rate\":16000,"
+        "\"channels\":1,\"frame_duration\":%d},"
+        "\"features\":{\"aec\":true,\"mcp\":true}}",
+        version_, OPUS_FRAME_DURATION_MS);
+#else
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"hello\",\"version\":%d,\"transport\":\"websocket\","
+        "\"audio_params\":{\"format\":\"opus\",\"sample_rate\":16000,"
+        "\"channels\":1,\"frame_duration\":%d},"
+        "\"features\":{\"mcp\":true}}",
+        version_, OPUS_FRAME_DURATION_MS);
 #endif
-    cJSON_AddBoolToObject(features, "mcp", true);
-    cJSON_AddItemToObject(root, "features", features);
-    cJSON_AddStringToObject(root, "transport", "websocket");
-    cJSON* audio_params = cJSON_CreateObject();
-    cJSON_AddStringToObject(audio_params, "format", "opus");
-    cJSON_AddNumberToObject(audio_params, "sample_rate", 16000);
-    cJSON_AddNumberToObject(audio_params, "channels", 1);
-    cJSON_AddNumberToObject(audio_params, "frame_duration", OPUS_FRAME_DURATION_MS);
-    cJSON_AddItemToObject(root, "audio_params", audio_params);
-    auto json_str = cJSON_PrintUnformatted(root);
-    std::string message(json_str);
-    cJSON_free(json_str);
-    cJSON_Delete(root);
-    return message;
+    return std::string(buf);
 }
 
 void WebsocketProtocol::ParseServerHello(const cJSON* root) {
