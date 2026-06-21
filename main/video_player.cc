@@ -15,6 +15,7 @@
 #include <esp_timer.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
+#include <freertos/idf_additions.h>   // xTaskCreatePinnedToCoreWithCaps / vTaskDeleteWithCaps
 #include <cJSON.h>
 #include <algorithm>
 #include <cstdlib>
@@ -613,10 +614,19 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
         // Stream task on core 0 alongside the network stack. With the WS
         // OnData callback now doing all parsing & dispatch on the tcp_receive
         // task, this task mostly just sleeps waiting for ws_done.
-        BaseType_t stream_task_ok = xTaskCreatePinnedToCore(
+        //
+        // Stack MUST go in PSRAM: with AFE audio + LVGL loaded, internal SRAM
+        // is nearly exhausted and the plain xTaskCreatePinnedToCore (internal
+        // stack) failed -> end_reason "stream_task_create_failed", 0 frames,
+        // no playback. PSRAM has megabytes free here. WithCaps stack is sized
+        // in BYTES (the classic API uses words), so multiply. WithCaps tasks
+        // are static under the hood -> the task self-deletes with
+        // vTaskDeleteWithCaps (see StreamReaderTask) or the PSRAM stack leaks.
+        BaseType_t stream_task_ok = xTaskCreatePinnedToCoreWithCaps(
                                         StreamReaderTask, "video_stream",
-                                        kStreamTaskStackWords, this, 3,
-                                        &stream_task_handle_, 0);
+                                        kStreamTaskStackWords * sizeof(StackType_t), this, 3,
+                                        &stream_task_handle_, 0,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (stream_task_ok != pdPASS || stream_task_handle_ == nullptr) {
             ESP_LOGE(TAG, "Failed to create video stream task");
             state_ = State::kError;
@@ -801,7 +811,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
     if (self->stop_requested_.load()) {
         self->stream_task_handle_ = nullptr;
         self->MaybeFinishPlayback();
-        vTaskDelete(nullptr);
+        vTaskDeleteWithCaps(nullptr);
         return;
     }
 
@@ -837,7 +847,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             self->stream_task_handle_ = nullptr;
             self->video_queue_cv_.notify_all();
             self->MaybeFinishPlayback();
-            vTaskDelete(nullptr);
+            vTaskDeleteWithCaps(nullptr);
             return;
         }
 
@@ -1014,7 +1024,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             self->playback_stats_.dropped_frames = self->dropped_frames_;
         }
         self->MaybeFinishPlayback();
-        vTaskDelete(nullptr);
+        vTaskDeleteWithCaps(nullptr);
         return;
     }
 
@@ -1375,7 +1385,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             audio.EnableWakeWordDetection(true);
             self->stream_task_handle_ = nullptr;
             self->MaybeFinishPlayback();
-            vTaskDelete(nullptr);
+            vTaskDeleteWithCaps(nullptr);
             return;
         }
 
@@ -1746,7 +1756,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
         }
         self->MaybeFinishPlayback();
-        vTaskDelete(nullptr);
+        vTaskDeleteWithCaps(nullptr);
         return;
     }
 
@@ -1767,7 +1777,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             self->video_queue_cv_.notify_all();
         }
         self->MaybeFinishPlayback();
-        vTaskDelete(nullptr);
+        vTaskDeleteWithCaps(nullptr);
         return;
     }
 
@@ -1868,7 +1878,7 @@ void VideoPlayer::StreamReaderTask(void* arg) {
         }
         Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
         self->MaybeFinishPlayback();
-        vTaskDelete(nullptr);
+        vTaskDeleteWithCaps(nullptr);
         return;
     }
 
@@ -2132,7 +2142,7 @@ stream_done:
         self->playback_stats_.dropped_frames = self->dropped_frames_;
     }
     self->MaybeFinishPlayback();
-    vTaskDelete(nullptr);
+    vTaskDeleteWithCaps(nullptr);
 }
 
 // ── VideoRenderTask ───────────────────────────────────────────────────────────
