@@ -73,6 +73,6 @@ private:
     std::atomic<bool> paused_{false};
 
     static constexpr const char* kSearchUrl =
-        "https://www.danscodellaro.com/esp32/xiaozhi/media/search";
+        "http://iot.danscodellaro.com/esp32/xiaozhi/media/search";
 
 };

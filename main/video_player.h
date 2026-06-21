@@ -220,7 +220,7 @@ private:
     void* prev_screen_    = nullptr;   // lv_obj_t* — restored on exit
 
     static constexpr const char* kSearchUrl =
-        "https://www.danscodellaro.com/esp32/xiaozhi/media/search";
+        "http://iot.danscodellaro.com/esp32/xiaozhi/media/search";
 
     static constexpr uint32_t kFrameMagic    = 0xDEADBEEFu;
     static constexpr uint32_t kFrameVideo    = 0u;

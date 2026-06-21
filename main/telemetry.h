@@ -166,7 +166,7 @@ private:
     std::mutex telemetry_ws_mutex_;
 
     static constexpr const char* kUrl =
-        "https://www.danscodellaro.com/esp32/xiaozhi/telemetry";
+        "http://iot.danscodellaro.com/esp32/xiaozhi/telemetry";
     // Default WS base; can be overridden via the OTA response's ws_base_url
     // field, which is stored in NVS namespace "net", key "ws_base".
     static constexpr const char* kDefaultWsBase =

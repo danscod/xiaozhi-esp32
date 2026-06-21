@@ -143,7 +143,7 @@ void McpServer::AddCommonTools() {
             auto  http    = network->CreateHttp(0);
             http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
             http->SetHeader("Device-Id",  SystemInfo::GetMacAddress().c_str());
-            if (!http->Open("GET", "https://www.danscodellaro.com/esp32/xiaozhi/about")) {
+            if (!http->Open("GET", "http://iot.danscodellaro.com/esp32/xiaozhi/about")) {
                 return std::string("Error: could not reach the about endpoint.");
             }
             if (http->GetStatusCode() != 200) {
