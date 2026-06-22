@@ -652,7 +652,9 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
             // with AFE+LVGL; self-deletes via vTaskDeleteWithCaps.
             BaseType_t render_task_ok = xTaskCreatePinnedToCoreWithCaps(
                                             VideoRenderTask, "video_render",
-                                            kRenderTaskStackWords * sizeof(StackType_t), this, 3,
+                                            // 32KB (BYTES) in PSRAM: JPEG decode ran in the 32KB
+                                            // stream task before; 12KB risks a decode stack overflow.
+                                            32768, this, 3,
                                             &render_task_handle_, 1,
                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             if (render_task_ok != pdPASS || render_task_handle_ == nullptr) {

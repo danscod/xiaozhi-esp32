@@ -53,8 +53,13 @@ private:
     // they don't overwrite the frames we DMA straight to the panel.
     std::unique_ptr<DisplayLockGuard> display_lock_;
 
-    // PrBoom needs a generous stack. 32 KB is what the upstream port used.
-    static constexpr uint32_t kEngineTaskStackBytes = 32768;
+    // PrBoom needs a generous stack. The task stack now lives in PSRAM
+    // (xTaskCreatePinnedToCoreWithCaps) because internal SRAM is exhausted by
+    // AFE+LVGL — a plain xTaskCreatePinnedToCore for 32KB internal silently
+    // FAILED (spawn returned pdFAIL) so DOOM never started. 64KB in PSRAM is
+    // cheap and gives prboom's deep render recursion headroom. (ESP-IDF stack
+    // size is in BYTES.)
+    static constexpr uint32_t kEngineTaskStackBytes = 65536;
     // Core 1: when DOOM is active LVGL and the video player are torn down,
     // so core 1 is the better choice (core 0 still hosts WiFi for the OTA
     // poll that we leave running).

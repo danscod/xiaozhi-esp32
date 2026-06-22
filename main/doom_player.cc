@@ -8,6 +8,9 @@
 #include "display.h"
 #include "mcp_server.h"
 
+#include <freertos/idf_additions.h>   // xTaskCreatePinnedToCoreWithCaps / vTaskDeleteWithCaps
+#include <esp_heap_caps.h>
+
 // PrBoom C entry points (declared in components/doom/prboom-esp32-compat/).
 extern "C" {
     void  spi_lcd_init(void);
@@ -76,14 +79,18 @@ std::string DoomPlayer::Start() {
     stop_requested_.store(false);
     state_.store(State::kRunning);
 
-    BaseType_t ok = xTaskCreatePinnedToCore(
+    // Stack in PSRAM: internal SRAM is exhausted by AFE+LVGL, so a plain
+    // xTaskCreatePinnedToCore (internal stack) silently failed here and DOOM
+    // never started. Self-deletes via vTaskDeleteWithCaps (below / in Stop).
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(
         &DoomPlayer::EngineTask,
         "doom_engine",
         kEngineTaskStackBytes,
         this,
         kEngineTaskPriority,
         &engine_task_handle_,
-        kEngineTaskCore);
+        kEngineTaskCore,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
         error_msg_ = "Failed to spawn DOOM engine task.";
         state_.store(State::kError);
@@ -112,7 +119,7 @@ void DoomPlayer::Stop() {
     // For a v1 attract-mode toy, that trade is fine.
     if (engine_task_handle_ != nullptr) {
         ESP_LOGI(TAG, "Killing DOOM engine task");
-        vTaskDelete(engine_task_handle_);
+        vTaskDeleteWithCaps(engine_task_handle_);
         engine_task_handle_ = nullptr;
     }
 
@@ -138,7 +145,7 @@ void DoomPlayer::EngineTask(void* arg) {
     doom_main(1, argv);
 
     ESP_LOGI(TAG, "DOOM engine returned (this is unexpected for attract mode)");
-    vTaskDelete(nullptr);
+    vTaskDeleteWithCaps(nullptr);
 }
 
 void DoomPlayer::RegisterMcpTools() {
