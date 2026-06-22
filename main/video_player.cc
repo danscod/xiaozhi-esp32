@@ -640,15 +640,21 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
             return;
         }
 
-        if (!use_sync_media_api_) {
+        {
             // Render task pinned to core 1: isolated from Wi-Fi/TCP work
             // (which are on core 0). JPEG decode + LCD push are the heaviest
             // CPU loads; giving them a dedicated core removes contention
-            // with the network receive path.
-            BaseType_t render_task_ok = xTaskCreatePinnedToCore(
+            // with the network receive path. Now created for sync_v1 too (not
+            // just WS): decoupling decode/present from the fetch loop is what
+            // unlocks ~24fps — the old single-task sync path presented one
+            // frame per fetch iteration (~11fps) and dropped the rest.
+            // Stack in PSRAM (WithCaps, BYTES) — internal SRAM is exhausted
+            // with AFE+LVGL; self-deletes via vTaskDeleteWithCaps.
+            BaseType_t render_task_ok = xTaskCreatePinnedToCoreWithCaps(
                                             VideoRenderTask, "video_render",
-                                            kRenderTaskStackWords, this, 3,
-                                            &render_task_handle_, 1);
+                                            kRenderTaskStackWords * sizeof(StackType_t), this, 3,
+                                            &render_task_handle_, 1,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             if (render_task_ok != pdPASS || render_task_handle_ == nullptr) {
                 ESP_LOGE(TAG, "Failed to create video render task");
                 state_ = State::kError;
@@ -1616,46 +1622,32 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             video_fetch_lead_ms = std::min(video_fetch_lead_ms, 8000);
 
             if (self->playback_started_.load() && frame_clock_ms >= 0) {
-                bool presented_due_frame = false;
-                int dropped_batch_frames = 0;
-                while (pending_video_frames.size() > 1 &&
-                       pending_video_frames[1].ts_ms <=
-                           static_cast<uint32_t>(frame_clock_ms + self->sync_frame_lead_ms_)) {
-                    pending_video_frames.pop_front();
-                    dropped_batch_frames++;
-                    self->dropped_frames_++;
-                }
-                if (dropped_batch_frames > 0) {
-                    std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
-                    self->playback_stats_.render_backlog_drop_count += dropped_batch_frames;
-                    self->playback_stats_.dropped_frames = self->dropped_frames_;
-                }
-
-                if (!pending_video_frames.empty() &&
-                    pending_video_frames.front().ts_ms <=
-                        static_cast<uint32_t>(frame_clock_ms + self->sync_frame_lead_ms_)) {
-                    auto frame = std::move(pending_video_frames.front());
-                    pending_video_frames.pop_front();
-                    presented_due_frame = true;
-                    if (!present_video_frame(frame.ts_ms, frame.jpeg, frame_clock_ms)) {
-                        fatal_error = true;
-                        self->SetPlaybackEndReason(sync_failure_reason.c_str());
-                        break;
+                // Hand fetched frames to VideoRenderTask (core 1) via the shared
+                // queue; it decodes + presents them timed to the audio clock and
+                // drops late frames itself. We no longer decode/present inline —
+                // that serialized fetch with render and capped playback at ~11fps
+                // (one present per fetch iteration). Drop oldest only if the queue
+                // is somehow saturated (render far behind).
+                size_t buffered_now = 0;
+                {
+                    std::lock_guard<std::mutex> lock(self->video_queue_mutex_);
+                    while (!pending_video_frames.empty()) {
+                        if (self->video_queue_.size() >= kMaxQueuedVideoFrames) {
+                            self->video_queue_.pop_front();
+                            self->dropped_frames_++;
+                        }
+                        self->video_queue_.push_back(std::make_unique<QueuedVideoFrame>(
+                            std::move(pending_video_frames.front())));
+                        pending_video_frames.pop_front();
                     }
-                }
-                if (fatal_error) {
-                    break;
-                }
-
-                if (presented_due_frame) {
-                    self->MaybePostPlaybackProgress();
-                    continue;
+                    buffered_now = self->video_queue_.size();
+                    self->video_queue_cv_.notify_all();
                 }
 
                 int target_buffered_frames = std::max(
                     self->sync_video_batch_frames_,
                     self->sync_video_batch_frames_ * kSyncTargetBufferedFrameBatches);
-                if (pending_video_frames.size() < static_cast<size_t>(target_buffered_frames)) {
+                if (buffered_now < static_cast<size_t>(target_buffered_frames)) {
                     int64_t desired_fetch_start_ms = frame_clock_ms + video_fetch_lead_ms;
                     int64_t batch_span_ms =
                         static_cast<int64_t>(self->sync_video_batch_frames_) * kSyncFrameIntervalMs;
@@ -2167,7 +2159,7 @@ void VideoPlayer::VideoRenderTask(void* arg) {
         self->render_failed_.store(true);
         Application::GetInstance().Schedule([self]() { self->UpdateDisplay(); });
         self->MaybeFinishPlayback();
-        vTaskDelete(nullptr);
+        vTaskDeleteWithCaps(nullptr);
         return;
     }
     self->buf_a_is_display_ = true;
@@ -2445,5 +2437,5 @@ void VideoPlayer::VideoRenderTask(void* arg) {
         self->video_queue_cv_.notify_all();
     }
     self->MaybeFinishPlayback();
-    vTaskDelete(nullptr);
+    vTaskDeleteWithCaps(nullptr);
 }
