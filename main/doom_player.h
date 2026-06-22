@@ -49,9 +49,9 @@ private:
     std::mutex         lifecycle_mutex_;
     TaskHandle_t       engine_task_handle_ = nullptr;
     std::string        error_msg_;
-    // Held for the duration of the DOOM session. Blocks LVGL refreshes so
-    // they don't overwrite the frames we DMA straight to the panel.
-    std::unique_ptr<DisplayLockGuard> display_lock_;
+    // LVGL is gated during a DOOM session via lvgl_port_stop()/resume() (see
+    // doom_player.cc) — NOT a held DisplayLockGuard, which is owner-thread-bound
+    // and deadlocked on cross-thread release at exit.
 
     // PrBoom needs a generous stack. The task stack now lives in PSRAM
     // (xTaskCreatePinnedToCoreWithCaps) because internal SRAM is exhausted by

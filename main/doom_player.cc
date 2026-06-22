@@ -10,6 +10,9 @@
 
 #include <freertos/idf_additions.h>   // xTaskCreatePinnedToCoreWithCaps / vTaskDeleteWithCaps
 #include <esp_heap_caps.h>
+#include <vector>
+#include "esp_lvgl_port.h"            // lvgl_port_stop / lvgl_port_resume (NOT the thread-bound lock)
+#include "audio_codec.h"             // device codec for DOOM audio output
 
 // PrBoom C entry points (declared in components/doom/prboom-esp32-compat/).
 extern "C" {
@@ -21,6 +24,38 @@ extern "C" {
 }
 
 #define TAG "DoomPlayer"
+
+// ── DOOM audio bridge (C shim) ───────────────────────────────────────────────
+// The DOOM sfx mixer (components/doom .../i_stubs_esp32.c) produces signed-16-bit
+// mono PCM and hands it here; we feed the device's external audio codec. This
+// replaces prboom's original ESP32 built-in-DAC output, which the S3 lacks.
+extern "C" int xiaozhi_doom_audio_open(void) {
+    auto* codec = Board::GetInstance().GetAudioCodec();
+    if (codec == nullptr) {
+        return 0;
+    }
+    codec->EnableOutput(true);
+    int rate = codec->output_sample_rate();
+    ESP_LOGI(TAG, "DOOM audio: codec output rate = %d Hz", rate);
+    return rate;
+}
+
+extern "C" void xiaozhi_doom_audio_write(const int16_t* pcm, int samples) {
+    if (pcm == nullptr || samples <= 0) {
+        return;
+    }
+    auto* codec = Board::GetInstance().GetAudioCodec();
+    if (codec == nullptr) {
+        return;
+    }
+    std::vector<int16_t> buf(pcm, pcm + samples);
+    codec->OutputData(buf);  // blocks on I2S DMA → paces the mixer task
+}
+
+extern "C" void xiaozhi_doom_audio_close(void) {
+    // Leave codec output enabled; the normal app path re-manages it after the
+    // DOOM session ends. Nothing to free here.
+}
 
 DoomPlayer& DoomPlayer::GetInstance() {
     static DoomPlayer instance;
@@ -72,9 +107,17 @@ std::string DoomPlayer::Start() {
     // Existing helper used by VideoPlayer for the same purpose.
     Application::GetInstance().EndVoiceSessionForMedia();
 
-    // Take the display lock for the whole session — blocks LVGL refreshes
-    // so they don't overwrite DOOM's frames. Released in Stop().
-    display_lock_ = std::make_unique<DisplayLockGuard>(display);
+    // Stop the LVGL timer for the whole DOOM session so LVGL won't flush over
+    // DOOM's direct-to-panel frames. We deliberately do NOT hold the LVGL port
+    // mutex (DisplayLockGuard) across the session: that mutex is owner-thread-
+    // bound, and Start() runs on the MCP task while Stop() runs on the button
+    // task — releasing it cross-thread left it held forever and DEADLOCKED the
+    // device on exit (audio task survived, display/main wedged). lvgl_port_stop/
+    // resume are plain timer controls callable from any task. Then take+release
+    // the lock once (same thread) as a one-shot barrier so any in-flight LVGL
+    // flush finishes before DOOM starts drawing.
+    lvgl_port_stop();
+    { DisplayLockGuard barrier(display); }  // one-shot: wait out any in-flight LVGL flush, then release
 
     stop_requested_.store(false);
     state_.store(State::kRunning);
@@ -95,6 +138,7 @@ std::string DoomPlayer::Start() {
         error_msg_ = "Failed to spawn DOOM engine task.";
         state_.store(State::kError);
         xiaozhi_doom_set_panel(nullptr);
+        lvgl_port_resume();  // we stopped it above — don't leave LVGL frozen
         return std::string("Failed: ") + error_msg_;
     }
 
@@ -117,15 +161,26 @@ void DoomPlayer::Stop() {
     // b) the display adapter's row buffers are small (~960 B), c) Start()
     // can be called again later — PrBoom's z_zone allocator re-bootstraps.
     // For a v1 attract-mode toy, that trade is fine.
+    // Best-effort: give the engine task a moment to fall out of any in-flight
+    // esp_lcd_panel_draw_bitmap (which holds the SPI bus mutex) before we kill
+    // it, so we don't leave the bus mutex held by a deleted task.
     if (engine_task_handle_ != nullptr) {
         ESP_LOGI(TAG, "Killing DOOM engine task");
+        vTaskDelay(pdMS_TO_TICKS(40));
         vTaskDeleteWithCaps(engine_task_handle_);
         engine_task_handle_ = nullptr;
     }
 
     xiaozhi_doom_set_panel(nullptr);
     xiaozhi_doom_set_wad(nullptr, 0);
-    display_lock_.reset();  // Releases the lock; LVGL refreshes resume.
+    // Resume the LVGL timer (any-task safe — see Start). Then repaint the normal
+    // UI over DOOM's last frame on the LVGL task.
+    lvgl_port_resume();
+    auto* display = Board::GetInstance().GetDisplay();
+    if (display) {
+        DisplayLockGuard redraw(display);
+        lv_obj_invalidate(lv_screen_active());
+    }
     state_.store(State::kIdle);
     ESP_LOGI(TAG, "DOOM stopped");
 }

@@ -20,7 +20,13 @@
 #define TAG "LcdDisplay"
 namespace {
 
-constexpr size_t kDirectVideoChunkLines = 16;
+// 8 (not 16): the internal DMA-capable video_dma_buffer_ = width*chunk*2 bytes.
+// At 16 lines that's ~7.6KB of scarce internal SRAM held for the whole video
+// session; during playback the JPEG decoder's work buffer (in a precompiled
+// lib — can't relocate to PSRAM) competes for the same internal heap and the
+// low-water dipped to ~171B. Halving to 8 frees ~3.8KB internal for the
+// decoder. Cost: 2x more (still chunked) draw_bitmap calls — fine, CPU is idle.
+constexpr size_t kDirectVideoChunkLines = 8;
 
 }  // namespace
 
