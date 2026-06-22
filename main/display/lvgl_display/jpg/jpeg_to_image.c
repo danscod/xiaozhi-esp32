@@ -58,8 +58,8 @@ static esp_err_t decode_with_new_jpeg(const uint8_t* src, size_t src_len, uint8_
     size_t required_len = out_info.width * out_info.height * 2;
     if (preallocated_out != NULL) {
         if (preallocated_out_len < required_len) {
-            ESP_LOGE(TAG, "Preallocated JPEG output buffer too small: need=%zu got=%zu",
-                     required_len, preallocated_out_len);
+            ESP_LOGE(TAG, "Preallocated JPEG output buffer too small: need=%lu got=%lu",
+                     (unsigned long)required_len, (unsigned long)preallocated_out_len);
             ret = ESP_ERR_INVALID_SIZE;
             goto jpeg_dec_failed;
         }
@@ -187,8 +187,8 @@ static esp_err_t decode_with_hardware_jpeg(const uint8_t* src, size_t src_len, u
 
     if (preallocated_out != NULL) {
         if (preallocated_out_len < out_buf_len) {
-            ESP_LOGE(TAG, "Preallocated hardware JPEG output buffer too small: need=%zu got=%zu",
-                     out_buf_len, preallocated_out_len);
+            ESP_LOGE(TAG, "Preallocated hardware JPEG output buffer too small: need=%lu got=%lu",
+                     (unsigned long)out_buf_len, (unsigned long)preallocated_out_len);
             ret = ESP_ERR_INVALID_SIZE;
             goto jpeg_hw_dec_failed;
         }
@@ -211,7 +211,7 @@ static esp_err_t decode_with_hardware_jpeg(const uint8_t* src, size_t src_len, u
     ESP_LOGD(TAG, "Expected %d bytes, got %" PRIu32 " bytes", out_buf_len, out_size);
 
     if (out_size != out_buf_len) {
-        ESP_LOGE(TAG, "Decoded image size mismatch: Expected %zu bytes, got %" PRIu32 " bytes", out_buf_len, out_size);
+        ESP_LOGE(TAG, "Decoded image size mismatch: Expected %lu bytes, got %" PRIu32 " bytes", (unsigned long)out_buf_len, out_size);
         ret = ESP_ERR_INVALID_SIZE;
         goto jpeg_hw_dec_failed;
     }
@@ -229,7 +229,7 @@ static esp_err_t decode_with_hardware_jpeg(const uint8_t* src, size_t src_len, u
             out_buf[2 * i] = rgb565 & 0xFF;
         } while (i != 0);
         out_size = header_info.width * header_info.height * 2;
-        ESP_LOGD(TAG, "Converted GRAY8 to RGB565, new size: %zu", out_size);
+        ESP_LOGD(TAG, "Converted GRAY8 to RGB565, new size: %lu", (unsigned long)out_size);
     }
 
     ESP_LOG_BUFFER_HEXDUMP(TAG, out_buf, MIN(out_size, 256), ESP_LOG_DEBUG);

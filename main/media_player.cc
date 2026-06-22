@@ -394,8 +394,8 @@ void MediaPlayer::StreamTask(void* arg) {
     }
     http->Close();
 
-    ESP_LOGI(TAG, "StreamTask: streamed %zu bytes (stopped=%d)",
-             total, (int)self->stop_requested_.load());
+    ESP_LOGI(TAG, "StreamTask: streamed %lu bytes (stopped=%d)",
+             (unsigned long)total, (int)self->stop_requested_.load());
 
     // Whether we finished naturally or were stopped, reset via StopPlayback.
     Application::GetInstance().Schedule([self]() { self->StopPlayback(); });

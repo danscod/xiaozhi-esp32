@@ -506,12 +506,12 @@ std::string VideoPlayer::StartItem(const std::string& item_id) {
     bool use_ws_media_api = cJSON_IsString(ws_stream_url_j) &&
                             ws_stream_url_j->valuestring[0] != '\0';
     std::string saved_ws_stream_url = use_ws_media_api ? ws_stream_url_j->valuestring : "";
-    ESP_LOGI(TAG, "PlayItem '%s': ws_stream_url_j=%p is_str=%d use_ws=%d body_len=%zu",
+    ESP_LOGI(TAG, "PlayItem '%s': ws_stream_url_j=%p is_str=%d use_ws=%d body_len=%lu",
              item_id.c_str(),
              (void*)ws_stream_url_j,
              ws_stream_url_j ? cJSON_IsString(ws_stream_url_j) : 0,
              (int)use_ws_media_api,
-             body.size());
+             (unsigned long)body.size());
     if (use_ws_media_api) {
         ESP_LOGI(TAG, "  ws_url=%s", ws_stream_url_j->valuestring);
     }
@@ -1024,8 +1024,8 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             self->stream_task_handle_ = nullptr;
             self->video_queue_cv_.notify_all();
         }
-        ESP_LOGI(TAG, "WS stream done: queued=%zu dropped=%zu stopped=%d",
-                 static_cast<size_t>(ws_queued_frames.load()), self->dropped_frames_,
+        ESP_LOGI(TAG, "WS stream done: queued=%lu dropped=%lu stopped=%d",
+                 (unsigned long)ws_queued_frames.load(), (unsigned long)self->dropped_frames_,
                  static_cast<int>(self->stop_requested_.load()));
         {
             std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
@@ -1539,8 +1539,8 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             }
             if (ret != ESP_OK || dec_len > kFrameBytes || w != kFrameW || h != kFrameH ||
                 stride != (kFrameW * 2)) {
-                ESP_LOGE(TAG, "Sync JPEG decode FAILED: ret=%d flen=%zu dec_len=%zu",
-                         ret, jpeg.size(), dec_len);
+                ESP_LOGE(TAG, "Sync JPEG decode FAILED: ret=%d flen=%lu dec_len=%lu",
+                         ret, (unsigned long)jpeg.size(), (unsigned long)dec_len);
                 std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
                 self->playback_stats_.video_frames_decode_failed++;
                 sync_failure_reason = "frame_decode_failed";
@@ -1738,8 +1738,8 @@ void VideoPlayer::StreamReaderTask(void* arg) {
             self->stream_task_handle_ = nullptr;
             self->video_queue_cv_.notify_all();
         }
-        ESP_LOGI(TAG, "SyncMediaTask: rendered=%zu fetched=%zu stopped=%d",
-                 rendered_frames, queued_frames, (int)self->stop_requested_.load());
+        ESP_LOGI(TAG, "SyncMediaTask: rendered=%lu fetched=%lu stopped=%d",
+                 (unsigned long)rendered_frames, (unsigned long)queued_frames, (int)self->stop_requested_.load());
         {
             std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
             self->playback_stats_.dropped_frames = self->dropped_frames_;
@@ -2129,8 +2129,8 @@ stream_done:
         self->stream_task_handle_ = nullptr;
         self->video_queue_cv_.notify_all();
     }
-    ESP_LOGI(TAG, "StreamReaderTask: queued=%zu dropped=%zu stopped=%d",
-             queued_frames, self->dropped_frames_, (int)self->stop_requested_.load());
+    ESP_LOGI(TAG, "StreamReaderTask: queued=%lu dropped=%lu stopped=%d",
+             (unsigned long)queued_frames, (unsigned long)self->dropped_frames_, (int)self->stop_requested_.load());
     {
         std::lock_guard<std::mutex> lock(self->playback_stats_mutex_);
         self->playback_stats_.dropped_frames = self->dropped_frames_;
@@ -2252,8 +2252,8 @@ void VideoPlayer::VideoRenderTask(void* arg) {
                     self->dropped_frames_++;
                 }
                 backlog_drops += static_cast<int>(popped);
-                ESP_LOGW(TAG, "Render stalled %lld ms — resync, dropped %zu frames",
-                         (long long)((stall_now_us - last_present_us) / 1000), popped);
+                ESP_LOGW(TAG, "Render stalled %lld ms — resync, dropped %lu frames",
+                         (long long)((stall_now_us - last_present_us) / 1000), (unsigned long)popped);
                 // Anchor audio_clock to the surviving frame so the selector
                 // picks it (it's "future" from the previous audio_clock but we
                 // want it rendered NOW).
@@ -2379,8 +2379,8 @@ void VideoPlayer::VideoRenderTask(void* arg) {
         }
         if (ret != ESP_OK || dec_len > kFrameBytes || w != kFrameW || h != kFrameH ||
             stride != (kFrameW * 2)) {
-            ESP_LOGE(TAG, "JPEG decode FAILED frame %zu: ret=%d flen=%zu dec_len=%zu",
-                     rendered_frames, ret, frame->jpeg.size(), dec_len);
+            ESP_LOGE(TAG, "JPEG decode FAILED frame %lu: ret=%d flen=%lu dec_len=%lu",
+                     (unsigned long)rendered_frames, ret, (unsigned long)frame->jpeg.size(), (unsigned long)dec_len);
             std::lock_guard<std::mutex> stats_lock(self->playback_stats_mutex_);
             self->playback_stats_.video_frames_decode_failed++;
             continue;
@@ -2427,8 +2427,8 @@ void VideoPlayer::VideoRenderTask(void* arg) {
         self->MaybePostPlaybackProgress();
     }
 
-    ESP_LOGI(TAG, "VideoRenderTask: rendered=%zu dropped=%zu stopped=%d",
-             rendered_frames, self->dropped_frames_, (int)self->stop_requested_.load());
+    ESP_LOGI(TAG, "VideoRenderTask: rendered=%lu dropped=%lu stopped=%d",
+             (unsigned long)rendered_frames, (unsigned long)self->dropped_frames_, (int)self->stop_requested_.load());
 
     // Re-enable wake word detection that was suppressed during video playback.
     Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);

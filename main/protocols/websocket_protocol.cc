@@ -190,7 +190,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
         SetError(Lang::Strings::SERVER_ERROR);
         return false;
     }
-    ESP_LOGI(TAG, "Sending hello (%zu bytes)", message.size());
+    ESP_LOGI(TAG, "Sending hello (%lu bytes)", (unsigned long)message.size());
     if (!SendText(message)) {
         return false;
     }
