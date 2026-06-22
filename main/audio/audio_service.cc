@@ -796,7 +796,7 @@ void AudioService::CheckAndUpdateAudioPowerState() {
     if (input_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->input_enabled()) {
         codec_->EnableInput(false);
     }
-    if (output_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->output_enabled()) {
+    if (output_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->output_enabled() && !output_keep_alive_) {
         // Keep TX clock when duplex RX is active; otherwise RX may stall on some boards.
         if (!(codec_->duplex() && codec_->input_enabled())) {
             codec_->EnableOutput(false);

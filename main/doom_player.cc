@@ -35,6 +35,11 @@ extern "C" int xiaozhi_doom_audio_open(void) {
         return 0;
     }
     codec->EnableOutput(true);
+    // Stop AudioService's power-save loop from disabling the codec output: DOOM
+    // writes PCM straight to the codec (bypassing AudioService), so its
+    // last_output_time_ never updates and the inactivity timeout would kill
+    // DOOM audio ~1s in (observed: "Set output enable to false" at 82085).
+    Application::GetInstance().GetAudioService().SetOutputKeepAlive(true);
     int rate = codec->output_sample_rate();
     ESP_LOGI(TAG, "DOOM audio: codec output rate = %d Hz", rate);
     return rate;
@@ -53,8 +58,9 @@ extern "C" void xiaozhi_doom_audio_write(const int16_t* pcm, int samples) {
 }
 
 extern "C" void xiaozhi_doom_audio_close(void) {
-    // Leave codec output enabled; the normal app path re-manages it after the
-    // DOOM session ends. Nothing to free here.
+    // Re-allow normal power-save management of the codec output now that DOOM
+    // is done (it will be disabled on the usual inactivity timeout).
+    Application::GetInstance().GetAudioService().SetOutputKeepAlive(false);
 }
 
 DoomPlayer& DoomPlayer::GetInstance() {

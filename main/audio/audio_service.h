@@ -146,8 +146,15 @@ public:
     AudioPlaybackMetricsSnapshot GetPlaybackMetrics() const;
     void SetModelsList(srmodel_list_t* models_list);
 
+    // When true, the audio power-save loop won't disable codec OUTPUT on
+    // inactivity. Used by DOOM, which writes PCM straight to the codec
+    // (bypassing this service), so last_output_time_ never updates and the
+    // power-save timeout would otherwise kill its audio mid-game.
+    void SetOutputKeepAlive(bool keep) { output_keep_alive_ = keep; }
+
 private:
     AudioCodec* codec_ = nullptr;
+    std::atomic<bool> output_keep_alive_{false};
     AudioServiceCallbacks callbacks_;
     std::unique_ptr<AudioProcessor> audio_processor_;
     std::unique_ptr<WakeWord> wake_word_;
