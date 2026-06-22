@@ -114,16 +114,23 @@ std::string DoomPlayer::Start() {
     Application::GetInstance().EndVoiceSessionForMedia();
 
     // Stop the LVGL timer for the whole DOOM session so LVGL won't flush over
-    // DOOM's direct-to-panel frames. We deliberately do NOT hold the LVGL port
-    // mutex (DisplayLockGuard) across the session: that mutex is owner-thread-
-    // bound, and Start() runs on the MCP task while Stop() runs on the button
-    // task — releasing it cross-thread left it held forever and DEADLOCKED the
-    // device on exit (audio task survived, display/main wedged). lvgl_port_stop/
-    // resume are plain timer controls callable from any task. Then take+release
-    // the lock once (same thread) as a one-shot barrier so any in-flight LVGL
-    // flush finishes before DOOM starts drawing.
-    lvgl_port_stop();
-    { DisplayLockGuard barrier(display); }  // one-shot: wait out any in-flight LVGL flush, then release
+    // DOOM's direct-to-panel frames. We do NOT *hold* the LVGL port mutex across
+    // the session (it's owner-thread-bound; Start runs on the MCP task, Stop on
+    // the button task — cross-thread release deadlocked). lvgl_port_stop/resume
+    // are plain timer controls callable from any task.
+    //
+    // ORDER MATTERS: take the lock FIRST, then stop. Acquiring the lock blocks
+    // until the LVGL port task finishes any in-flight render (it renders while
+    // holding this same lock), so rendering_in_progress is guaranteed false when
+    // we stop the timer. Stopping BEFORE locking could freeze the timer
+    // mid-render, leaving rendering_in_progress stuck true — then the next
+    // lv_obj_invalidate from the main loop's status bar hits
+    // LV_ASSERT_MSG(!rendering_in_progress) whose handler is while(1) → main
+    // task hangs ~30s later (TWDT). Scoped guard = same-thread acquire+release.
+    {
+        DisplayLockGuard hold(display);
+        lvgl_port_stop();
+    }
 
     stop_requested_.store(false);
     state_.store(State::kRunning);
@@ -181,11 +188,15 @@ void DoomPlayer::Stop() {
     xiaozhi_doom_set_wad(nullptr, 0);
     // Resume the LVGL timer (any-task safe — see Start). Then repaint the normal
     // UI over DOOM's last frame on the LVGL task.
-    lvgl_port_resume();
     auto* display = Board::GetInstance().GetDisplay();
     if (display) {
-        DisplayLockGuard redraw(display);
+        // Resume + repaint under the lock (same-thread scoped) so the timer
+        // doesn't restart a render until LVGL state is consistent again.
+        DisplayLockGuard hold(display);
+        lvgl_port_resume();
         lv_obj_invalidate(lv_screen_active());
+    } else {
+        lvgl_port_resume();
     }
     state_.store(State::kIdle);
     ESP_LOGI(TAG, "DOOM stopped");
