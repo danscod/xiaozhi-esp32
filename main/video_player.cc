@@ -690,9 +690,11 @@ void VideoPlayer::TogglePause() {
     if (state_ == State::kIdle) return;
     bool now_paused = !paused_.load();
     paused_.store(now_paused);
-    if (now_paused) {
-        Application::GetInstance().GetAudioService().ResetDecoder();
-    }
+    // Freeze BOTH sides: paused_ gates the render task (video), SetOutputPaused
+    // freezes the audio output task (audio + WS backpressure). Was ResetDecoder,
+    // which only flushed audio once — the WS kept streaming and audio kept
+    // playing (video-only pause; ~542 frames dropped over a 25s pause).
+    Application::GetInstance().GetAudioService().SetOutputPaused(now_paused);
     ESP_LOGI(TAG, "Playback %s", now_paused ? "paused" : "resumed");
 }
 

@@ -152,9 +152,17 @@ public:
     // power-save timeout would otherwise kill its audio mid-game.
     void SetOutputKeepAlive(bool keep) { output_keep_alive_ = keep; }
 
+    // Freeze/unfreeze audio OUTPUT playback (used by video pause). Freezing the
+    // output task stops draining the playback queue → the decode queue fills →
+    // the media WS push blocks → the server backpressures (no frames streamed +
+    // dropped during pause). On resume the output task re-anchors the playback
+    // clock to the next packet, so video re-syncs. NOT a flush — queues persist.
+    void SetOutputPaused(bool p) { output_paused_ = p; }
+
 private:
     AudioCodec* codec_ = nullptr;
     std::atomic<bool> output_keep_alive_{false};
+    std::atomic<bool> output_paused_{false};
     AudioServiceCallbacks callbacks_;
     std::unique_ptr<AudioProcessor> audio_processor_;
     std::unique_ptr<WakeWord> wake_word_;

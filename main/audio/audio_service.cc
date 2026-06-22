@@ -304,6 +304,12 @@ void AudioService::AudioInputTask() {
 
 void AudioService::AudioOutputTask() {
     while (true) {
+        // Video pause freezes output here: don't drain the playback queue, which
+        // backpressures the whole media pipeline (decode queue fills → WS push
+        // blocks → server pauses). Resume continues from the same packet.
+        while (output_paused_.load() && !service_stopped_) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
         audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
         if (service_stopped_) {
