@@ -2254,8 +2254,10 @@ void VideoPlayer::VideoRenderTask(void* arg) {
                     self->dropped_frames_++;
                 }
                 backlog_drops += static_cast<int>(popped);
-                ESP_LOGW(TAG, "Render stalled %lld ms — resync, dropped %lu frames",
-                         (long long)((stall_now_us - last_present_us) / 1000), (unsigned long)popped);
+                // newlib-nano printf has no %lld (long long); use %lu — a stall
+                // duration in ms fits a 32-bit long fine.
+                ESP_LOGW(TAG, "Render stalled %lu ms — resync, dropped %lu frames",
+                         (unsigned long)((stall_now_us - last_present_us) / 1000), (unsigned long)popped);
                 // Anchor audio_clock to the surviving frame so the selector
                 // picks it (it's "future" from the previous audio_clock but we
                 // want it rendered NOW).

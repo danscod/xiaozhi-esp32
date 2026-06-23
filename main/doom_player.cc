@@ -22,6 +22,7 @@ extern "C" {
     void  xiaozhi_doom_set_wad(const void* buf, size_t len);
     int   doom_main(int argc, char const* const* argv);
     void  gamepadInit(void);
+    void  I_ShutdownSound(void);   // stop the sfx mixer + OPL music audio task
 }
 
 #define TAG "DoomPlayer"
@@ -187,6 +188,13 @@ void DoomPlayer::Stop() {
         vTaskDeleteWithCaps(engine_task_handle_);
         engine_task_handle_ = nullptr;
     }
+
+    // Stop the DOOM audio task (sfx mixer + OPL music render). We hard-killed the
+    // engine, so DOOM's normal shutdown (which calls I_ShutdownSound) never runs —
+    // without this the audio task LEAKS and keeps running on core 0 doing OPL
+    // synthesis, which starves the LCD flush-done signalling and HANGS taskLVGL on
+    // resume (wait_for_flushing). Stopping it frees core 0 for the LVGL repaint.
+    I_ShutdownSound();
 
     xiaozhi_doom_set_panel(nullptr);
     xiaozhi_doom_set_wad(nullptr, 0);
