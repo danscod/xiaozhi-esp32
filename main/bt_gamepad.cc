@@ -31,14 +31,14 @@ static esp_hidh_dev_t*   s_dev = nullptr;
 static portMUX_TYPE      s_state_mux = portMUX_INITIALIZER_UNLOCKED;
 static bt_gamepad_state_t s_state = {};
 
-// True if a scan result looks like our gamepad: a BLE device whose name matches
-// the Q36, or which presents a joystick/gamepad HID usage.
+// The specific controller, baked in (confirmed via nRF Connect):
+//   HID mode:         name "Q36 for Android", MAC 03:25:00:33:AF:EB
+//   ShootingPlus mode:name "ShanWan Q36",     MAC 01:25:00:33:AF:EB
+// Both are standard BLE HID (HOGP, 0x1812). Manufacturer "ShanWan BM-769".
+// We match by name so we never grab some other random BLE gamepad nearby.
 static bool looks_like_q36(const esp_hid_scan_result_t* r) {
-    if (r->transport != ESP_HID_TRANSPORT_BLE) return false;
-    if (r->name && (strstr(r->name, "Q36") || strstr(r->name, "ShanWan"))) return true;
-    // Fallbacks by HID usage (Q36 reports as a joystick, appearance 0x03C3).
-    if (r->usage == ESP_HID_USAGE_GAMEPAD || r->usage == ESP_HID_USAGE_JOYSTICK) return true;
-    return false;
+    if (r->transport != ESP_HID_TRANSPORT_BLE || !r->name) return false;
+    return strstr(r->name, "Q36") != nullptr || strstr(r->name, "ShanWan") != nullptr;
 }
 
 // esp_hidh event callback (default event loop). C linkage for esp_event.

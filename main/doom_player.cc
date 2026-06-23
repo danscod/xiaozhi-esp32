@@ -27,6 +27,8 @@ extern "C" {
     void  xiaozhi_doom_draw_unlock(void);
 }
 
+#include "bt_gamepad.h"   // auto-connect the Q36 BLE controller while DOOM runs
+
 #define TAG "DoomPlayer"
 
 // ── DOOM audio bridge (C shim) ───────────────────────────────────────────────
@@ -163,6 +165,12 @@ std::string DoomPlayer::Start() {
     }
 
     ESP_LOGI(TAG, "DOOM engine task spawned on core %d", (int)kEngineTaskCore);
+
+    // Bring up the BLE controller for play (best-effort: if BT init fails or no
+    // controller is around, DOOM just runs without it). Bonding persists in NVS,
+    // so after the first pair it reconnects on its own.
+    bt_gamepad_start();
+
     return std::string("DOOM started.");
 }
 
@@ -174,6 +182,11 @@ void DoomPlayer::Stop() {
     }
 
     stop_requested_.store(true);
+
+    // Release the BLE controller first (independent of the LVGL/SPI teardown
+    // below, so it can't affect the exit path). Best-effort: just closes the HID
+    // connection + frees the controller memory back to the normal path.
+    bt_gamepad_stop();
 
     // PrBoom is single-threaded C with no cooperative shutdown path. Killing
     // the task from outside leaks whatever PrBoom allocated (mostly on the
