@@ -37,8 +37,10 @@ set(SOURCES "audio/audio_codec.cc"
             "flappy_bird.cc"
             "video_player.cc"
             "doom_player.cc"
-            "bt_gamepad.cc"
-            "esp_hid_gap.c"
+            # bt_gamepad.cc / esp_hid_gap.c — BLE Q36 controller. SHELVED: linking
+            # the BT stack reserves internal RAM at boot that starves the assistant
+            # AFE (device went deaf). Re-add with BT config when a memory strategy
+            # (game-mode reboot that frees the AFE) is in place. Files kept in tree.
             "ota.cc"
             "settings.cc"
             "device_state_machine.cc"
@@ -974,8 +976,6 @@ idf_component_register(SRCS ${SOURCES}
                         console
                         efuse
                         bt
-                        esp_hid
-                        nvs_flash
                         fatfs
                         prboom-esp32-compat
                     )
