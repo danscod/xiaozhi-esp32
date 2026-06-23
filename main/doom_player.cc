@@ -64,61 +64,8 @@ extern "C" void xiaozhi_doom_audio_close(void) {
     Application::GetInstance().GetAudioService().SetOutputKeepAlive(false);
 }
 
-// Fetch the DOOM soundtrack (pre-rendered raw s16 mono PCM at the codec rate,
-// 24 kHz) into a PSRAM buffer. Returns the sample buffer + count via out params,
-// or nullptr on failure. One-shot ~4.4 MB GET over the iot origin; called from
-// the DOOM engine task at music start (blocking is fine — only delays the demo).
-extern "C" int16_t* xiaozhi_doom_music_load(size_t* out_samples) {
-    if (out_samples) *out_samples = 0;
-    const char* url = "http://iot.danscodellaro.com/esp32/xiaozhi/media/files/doom_E1M1.pcm";
-    auto network = Board::GetInstance().GetNetwork();
-    auto http = network->CreateHttp(0);
-    http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
-    http->SetHeader("Device-Id",  SystemInfo::GetMacAddress().c_str());
-    http->SetTimeout(20000);
-    if (!http->Open("GET", url)) {
-        ESP_LOGE(TAG, "music: HTTP open failed");
-        return nullptr;
-    }
-    if (http->GetStatusCode() != 200) {
-        ESP_LOGE(TAG, "music: HTTP %d", http->GetStatusCode());
-        http->Close();
-        return nullptr;
-    }
-    size_t len = http->GetBodyLength();
-    if (len < 2 || (len & 1)) {
-        ESP_LOGE(TAG, "music: bad length %u", (unsigned)len);
-        http->Close();
-        return nullptr;
-    }
-    uint8_t* buf = static_cast<uint8_t*>(
-        heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (!buf) {
-        ESP_LOGE(TAG, "music: PSRAM alloc %u failed", (unsigned)len);
-        http->Close();
-        return nullptr;
-    }
-    size_t got = 0;
-    while (got < len) {
-        int n = http->Read(reinterpret_cast<char*>(buf + got), len - got);
-        if (n <= 0) break;
-        got += n;
-    }
-    http->Close();
-    if (got != len) {
-        ESP_LOGE(TAG, "music: short read %u/%u", (unsigned)got, (unsigned)len);
-        heap_caps_free(buf);
-        return nullptr;
-    }
-    if (out_samples) *out_samples = len / 2;
-    ESP_LOGI(TAG, "music: loaded %u samples (%.1f MB) to PSRAM",
-             (unsigned)(len / 2), len / 1048576.0);
-    return reinterpret_cast<int16_t*>(buf);
-}
-
-extern "C" void xiaozhi_doom_music_free(int16_t* buf) {
-    if (buf) heap_caps_free(buf);
-}
+// (Music is now synthesized on-device via OPL2/DBOPL — see the prboom MUSIC
+// backend in components/doom. The old pre-rendered-PCM fetch shim was removed.)
 
 DoomPlayer& DoomPlayer::GetInstance() {
     static DoomPlayer instance;
