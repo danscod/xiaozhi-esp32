@@ -816,6 +816,15 @@ void AudioService::CheckAndUpdateAudioPowerState() {
 void AudioService::SetModelsList(srmodel_list_t* models_list) {
     models_list_ = models_list;
 
+#ifdef CONFIG_WAKE_WORD_DISABLED
+    // Wake word permanently disabled (button-to-talk only). Don't create the
+    // wake-word object, so its wakenet model never loads — frees the always-
+    // resident internal RAM. EnableWakeWordDetection() no-ops on a null
+    // wake_word_; button listening uses the separate voice-processing path.
+    wake_word_ = nullptr;
+    return;
+#endif
+
 #if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
     if (esp_srmodel_filter(models_list_, ESP_MN_PREFIX, NULL) != nullptr) {
         wake_word_ = std::make_unique<CustomWakeWord>();
