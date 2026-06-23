@@ -23,6 +23,8 @@ extern "C" {
     int   doom_main(int argc, char const* const* argv);
     void  gamepadInit(void);
     void  I_ShutdownSound(void);   // stop the sfx mixer + OPL music audio task
+    void  xiaozhi_doom_draw_lock(void);    // block until the engine is outside a panel draw
+    void  xiaozhi_doom_draw_unlock(void);
 }
 
 #define TAG "DoomPlayer"
@@ -179,14 +181,19 @@ void DoomPlayer::Stop() {
     // b) the display adapter's row buffers are small (~960 B), c) Start()
     // can be called again later — PrBoom's z_zone allocator re-bootstraps.
     // For a v1 attract-mode toy, that trade is fine.
-    // Best-effort: give the engine task a moment to fall out of any in-flight
-    // esp_lcd_panel_draw_bitmap (which holds the SPI bus mutex) before we kill
-    // it, so we don't leave the bus mutex held by a deleted task.
+    // Acquire the DOOM draw lock BEFORE deleting the engine: this blocks until
+    // the engine is outside spi_lcd_send (i.e. not inside esp_lcd_panel_draw_bitmap
+    // holding the SPI bus mutex). Killing it mid-draw leaves the bus mutex locked
+    // by a dead task → taskLVGL's next flush blocks on it forever, wedging the
+    // display lock + rendering_in_progress, and the main task hangs in lv_inv_area
+    // ~30s later (TWDT). Deterministic replacement for the old 40ms guess, which
+    // started losing once OPL music made the engine's frame timing heavier.
     if (engine_task_handle_ != nullptr) {
         ESP_LOGI(TAG, "Killing DOOM engine task");
-        vTaskDelay(pdMS_TO_TICKS(40));
+        xiaozhi_doom_draw_lock();
         vTaskDeleteWithCaps(engine_task_handle_);
         engine_task_handle_ = nullptr;
+        xiaozhi_doom_draw_unlock();
     }
 
     // Stop the DOOM audio task (sfx mixer + OPL music render). We hard-killed the
