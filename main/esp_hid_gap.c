@@ -1011,10 +1011,12 @@ static esp_err_t start_nimble_scan(uint32_t seconds)
         return rc;
     }
 
-    /* Tell the controller to filter duplicates; we don't want to process
-     * repeated advertisements from the same device.
-     */
-    disc_params.filter_duplicates = 1;
+    /* Do NOT filter duplicates: many controllers (the Q36) advertise their NAME
+     * in the SCAN RESPONSE, a separate packet. With duplicate filtering on, the
+     * nameless primary ADV is reported once and the named scan-response is
+     * suppressed, so we never learn the name (and can't match it). Off = we see
+     * both the ADV and the scan response. */
+    disc_params.filter_duplicates = 0;
 
     /**
      * Perform active scan.
