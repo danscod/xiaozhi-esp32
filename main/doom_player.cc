@@ -1,6 +1,8 @@
 #include "doom_player.h"
 
 #include <esp_log.h>
+#include <esp_system.h>   // esp_restart (game-mode exit)
+#include "game_mode.h"
 
 #include "application.h"
 #include "assets.h"
@@ -225,6 +227,15 @@ void DoomPlayer::Stop() {
     }
     state_.store(State::kIdle);
     ESP_LOGI(TAG, "DOOM stopped");
+
+    // In game mode the assistant/WiFi were never started — exiting DOOM returns
+    // to the normal assistant by rebooting (clean way back, since BLE memory and
+    // the WiFi skip can't be undone at runtime).
+    if (game_mode_active()) {
+        ESP_LOGW(TAG, "game mode: DOOM exited — rebooting to normal mode");
+        vTaskDelay(pdMS_TO_TICKS(300));
+        esp_restart();
+    }
 }
 
 void DoomPlayer::EngineTask(void* arg) {
@@ -257,6 +268,22 @@ void DoomPlayer::RegisterMcpTools() {
         [this](const PropertyList& props) -> ReturnValue {
             (void)props;
             return Start();
+        });
+
+    mcp.AddTool(
+        "self.doom.start_controller",
+        "Play DOOM WITH A BLUETOOTH CONTROLLER. Use this when the user says "
+        "\"play doom with a controller\" / \"with the gamepad\". The device "
+        "REBOOTS into a game mode (the voice assistant and WiFi are turned off to "
+        "free memory for Bluetooth), connects the ShanWan Q36 controller (have it "
+        "on in HID mode), and launches DOOM. Long-press the button to exit, which "
+        "reboots back to the normal assistant. Plain \"play doom\" (self.doom.start) "
+        "stays in normal mode with no controller and no reboot.",
+        PropertyList(),
+        [](const PropertyList& props) -> ReturnValue {
+            (void)props;
+            game_mode_request_and_reboot();   // sets flag + esp_restart (no return)
+            return std::string("Rebooting into controller game mode…");
         });
 
     mcp.AddTool(

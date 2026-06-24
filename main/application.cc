@@ -1,6 +1,9 @@
 #include "application.h"
 #include "telemetry.h"
 #include "board.h"
+#include "game_mode.h"
+#include "doom_player.h"
+#include "bt_gamepad.h"
 #include "display.h"
 #include "system_info.h"
 #include "audio_codec.h"
@@ -160,8 +163,15 @@ void Application::Initialize() {
         }
     });
 
-    // Start network asynchronously
-    board.StartNetwork();
+    // Start network asynchronously — SKIPPED in game mode: WiFi/LWIP/protocol are
+    // the big internal-RAM consumers, and freeing them is what leaves room for the
+    // BLE controller + DOOM. (No network is needed for DOOM/controller; OPL music
+    // is on-device.) Skipping StartNetwork also skips ActivationTask/protocol.
+    if (!game_mode_active()) {
+        board.StartNetwork();
+    } else {
+        ESP_LOGW(TAG, "game mode: skipping WiFi/network to free RAM for BLE + DOOM");
+    }
 
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
@@ -170,6 +180,17 @@ void Application::Initialize() {
 void Application::Run() {
     // Set the priority of the main task to 10
     vTaskPrioritySet(nullptr, 10);
+
+    // GAME MODE: WiFi/assistant are skipped, so the RAM is free for the BLE
+    // controller. Bring up the gamepad and launch DOOM straight away. Exiting
+    // DOOM (long-press) reboots back to normal mode (see DoomPlayer::Stop). The
+    // event loop below still runs (button handling), but there's no network.
+    if (game_mode_active()) {
+        ESP_LOGW(TAG, "game mode: starting BLE controller + DOOM");
+        SetDeviceState(kDeviceStateIdle);
+        bt_gamepad_start();
+        DoomPlayer::GetInstance().Start();
+    }
 
     const EventBits_t ALL_EVENTS = 
         MAIN_EVENT_SCHEDULE |
