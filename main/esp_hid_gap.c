@@ -850,14 +850,17 @@ static void handle_ble_device_result(const struct ble_gap_disc_desc *disc)
         appearance = fields.appearance;
     }
 
+    // The upstream example only matched its OWN demo devices (HID UUID in ADV +
+    // hardcoded names "ESP BLE HID2"/"ESP Mouse"/"ESP Keyboard"). Real gamepads
+    // like the Q36 don't advertise the HID service UUID (it's discovered via GATT
+    // after connecting) and have their own name. So add any NAMED device (or one
+    // advertising the HID UUID); the caller (looks_like_q36) picks the Q36 by name.
+    bool is_hid = false;
     for (int i = 0; i < fields.num_uuids16; i++) {
-        if (ble_uuid_u16(&fields.uuids16[i].u) == BLE_HID_SVC_UUID &&
-            ((adv_name_len > 0 && memcmp("ESP BLE HID2", adv_name, adv_name_len) == 0) ||
-            (adv_name_len > 0 && memcmp("ESP Mouse", adv_name, adv_name_len) == 0) ||
-            (adv_name_len > 0 && memcmp("ESP Keyboard", adv_name, adv_name_len) == 0))) {
-            add_ble_scan_result(disc->addr.val, disc->addr.type, appearance, adv_name, adv_name_len, disc->rssi);
-            break;
-        }
+        if (ble_uuid_u16(&fields.uuids16[i].u) == BLE_HID_SVC_UUID) { is_hid = true; break; }
+    }
+    if (adv_name_len > 0 || is_hid) {
+        add_ble_scan_result(disc->addr.val, disc->addr.type, appearance, adv_name, adv_name_len, disc->rssi);
     }
 }
 #endif
