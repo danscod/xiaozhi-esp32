@@ -187,7 +187,6 @@ void Application::Run() {
     // event loop below still runs (button handling), but there's no network.
     if (game_mode_active()) {
         ESP_LOGW(TAG, "game mode: starting BLE controller + DOOM");
-        SetDeviceState(kDeviceStateIdle);
         bt_gamepad_start();
         DoomPlayer::GetInstance().Start();
     }

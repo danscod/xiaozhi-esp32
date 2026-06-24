@@ -12,6 +12,8 @@
 
 #include "esp_hidh.h"
 #include "esp_hid_gap.h"
+#include "host/ble_hs.h"        // ble_hs_synced
+#include "host/util/util.h"     // ble_hs_util_ensure_addr
 
 #include "mcp_server.h"
 
@@ -91,6 +93,20 @@ extern "C" void bt_gamepad_hidh_cb(void* handler_args, esp_event_base_t base,
 // Scan for the Q36 and open it. Exits once connected or after kScanMaxRounds.
 static void scan_task(void* arg) {
     (void)arg;
+
+    // NimBLE needs an identity address before a scan can infer own_addr_type;
+    // without one, ble_hs_id_infer_auto() inside the scan derefs NULL and panics
+    // (LoadProhibited). Wait for the host to sync, then ensure an address exists.
+    for (int i = 0; i < 100 && !ble_hs_synced(); i++) vTaskDelay(pdMS_TO_TICKS(50));
+    int addr_rc = ble_hs_util_ensure_addr(0);
+    ESP_LOGI(TAG, "BLE host synced=%d ensure_addr=%d", (int)ble_hs_synced(), addr_rc);
+    if (!ble_hs_synced()) {
+        ESP_LOGE(TAG, "BLE host never synced — aborting scan");
+        s_scan_task = nullptr;
+        vTaskDelete(nullptr);
+        return;
+    }
+
     for (int round = 0; round < kScanMaxRounds && !s_connected.load() && s_started.load(); round++) {
         size_t num = 0;
         esp_hid_scan_result_t* results = nullptr;
