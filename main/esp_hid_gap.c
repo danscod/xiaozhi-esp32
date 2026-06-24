@@ -850,18 +850,12 @@ static void handle_ble_device_result(const struct ble_gap_disc_desc *disc)
         appearance = fields.appearance;
     }
 
-    // The upstream example only matched its OWN demo devices (HID UUID in ADV +
-    // hardcoded names "ESP BLE HID2"/"ESP Mouse"/"ESP Keyboard"). Real gamepads
-    // like the Q36 don't advertise the HID service UUID (it's discovered via GATT
-    // after connecting) and have their own name. So add any NAMED device (or one
-    // advertising the HID UUID); the caller (looks_like_q36) picks the Q36 by name.
-    bool is_hid = false;
-    for (int i = 0; i < fields.num_uuids16; i++) {
-        if (ble_uuid_u16(&fields.uuids16[i].u) == BLE_HID_SVC_UUID) { is_hid = true; break; }
-    }
-    if (adv_name_len > 0 || is_hid) {
-        add_ble_scan_result(disc->addr.val, disc->addr.type, appearance, adv_name, adv_name_len, disc->rssi);
-    }
+    // Add EVERY discovered device (add_ble_scan_result dedups by address). The
+    // caller (looks_like_q36) picks the Q36 by name. Adding all also makes the
+    // scan log a full list of what's in range — so we can see whether the Q36's
+    // packets are even reaching us vs being filtered. (The upstream example only
+    // matched its own demo HID devices, which is why nothing else ever showed.)
+    add_ble_scan_result(disc->addr.val, disc->addr.type, appearance, adv_name, adv_name_len, disc->rssi);
 }
 #endif
 
