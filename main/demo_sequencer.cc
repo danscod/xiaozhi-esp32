@@ -105,10 +105,14 @@ void demo_sequencer_register_mcp(void) {
 
     mcp.AddTool(
         "self.test.run",
-        "Run the device self-test / demo sequence: plays music, then a video, then "
-        "Flappy Bird, then DOOM, one after another, ~10-20s each, logging device "
-        "health (free RAM) between each over serial. Use to demo the device or "
-        "capture a full regression snapshot. Use self.test.stop to abort.",
+        "Run the device's built-in SELF-TEST / DEMO sequence. THIS is the correct "
+        "tool whenever the user says \"play test\", \"run test\", \"run the test\", "
+        "\"test the device\", \"run the demo\", \"demo mode\", or \"self test\". "
+        "For those phrases, DO NOT use the media/video play or search tools and DO "
+        "NOT try to play a 'test' audio tone or 'test' video item — use THIS tool. "
+        "It plays music, then a video, then Flappy Bird, then DOOM one after "
+        "another (~10-20s each), logging device health over serial. Use "
+        "self.test.stop to abort.",
         PropertyList(),
         [](const PropertyList&) -> ReturnValue {
             if (s_running.exchange(true)) {
