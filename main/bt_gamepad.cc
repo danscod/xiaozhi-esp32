@@ -14,6 +14,8 @@
 #include "esp_hid_gap.h"
 #include "host/ble_hs.h"        // ble_hs_synced
 #include "host/util/util.h"     // ble_hs_util_ensure_addr
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
 
 #include "mcp_server.h"
 
@@ -88,6 +90,13 @@ extern "C" void bt_gamepad_hidh_cb(void* handler_args, esp_event_base_t base,
     default:
         break;
     }
+}
+
+// The NimBLE host event loop. Runs until nimble_port_stop().
+static void ble_host_task(void* param) {
+    (void)param;
+    nimble_port_run();
+    nimble_port_freertos_deinit();
 }
 
 // Scan for the Q36 and open it. Exits once connected or after kScanMaxRounds.
@@ -170,6 +179,12 @@ esp_err_t bt_gamepad_start(void) {
         s_started.store(false);
         return ret;
     }
+
+    // RUN the NimBLE host. esp_hid_gap_init only port-inits the host and
+    // esp_hidh_init only registers ble_hs_cfg.sync_cb — nobody starts the host
+    // event-loop task, so the controller never syncs ("BLE host never synced").
+    // Start it here; it processes the sync event so ble_hs_synced() becomes true.
+    nimble_port_freertos_init(ble_host_task);
 
     ESP_LOGI(TAG, "BLE HID host up — scanning for the Q36 (HID mode)");
     xTaskCreate(scan_task, "bt_gp_scan", 4096, nullptr, 5, &s_scan_task);
