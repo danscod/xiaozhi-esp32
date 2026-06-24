@@ -635,11 +635,13 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
+                        // Always return to idle after speaking — this is a
+                        // button-to-talk device (wake word disabled). The old
+                        // non-ManualStop path auto-relistened: it reopened the mic
+                        // ~40ms after playback, picked up the speaker tail (AEC
+                        // couldn't suppress it) and false-triggered a runaway echo
+                        // loop. Require a button press for the next turn.
+                        SetDeviceState(kDeviceStateIdle);
                     }
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
