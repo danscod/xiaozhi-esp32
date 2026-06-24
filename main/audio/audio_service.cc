@@ -253,7 +253,11 @@ void AudioService::AudioInputTask() {
         }
         if (audio_input_need_warmup_) {
             audio_input_need_warmup_ = false;
-            vTaskDelay(pdMS_TO_TICKS(120));
+            // 600ms (was 120ms): discard the mic input right after listening
+            // starts so the speaker's audio tail / AEC residue from the previous
+            // response isn't picked up as a phantom command (echo loop). This is
+            // a button-to-talk device, so a longer warmup is harmless.
+            vTaskDelay(pdMS_TO_TICKS(600));
             continue;
         }
 

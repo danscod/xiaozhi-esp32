@@ -56,6 +56,9 @@ public:
     // Stop playback from any context (button callback, MCP tool, other player).
     void Stop();
 
+    // Start playback of a library item by id (also used by the demo sequencer).
+    std::string StartItem(const std::string& item_id);
+
     // Soft pause: freeze video frames and silence audio without closing the stream.
     void TogglePause();
     bool IsPaused() const { return paused_.load(); }
@@ -66,7 +69,6 @@ private:
     VideoPlayer& operator=(const VideoPlayer&) = delete;
 
     std::string FetchSearchResults(const std::string& query);
-    std::string StartItem(const std::string& item_id);
     void StopPlayback();
     void CreateVideoScreen();
     void DestroyVideoScreen();

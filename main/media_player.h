@@ -34,6 +34,10 @@ public:
     // Stop playback from any context (e.g. hardware button).
     void Stop();
 
+    // Fetch the play URL for an item ID, then kick off the stream task. Returns
+    // an error string if the item isn't found. (Also used by the demo sequencer.)
+    std::string StartItem(const std::string& item_id);
+
     // Soft pause: freeze audio output without closing the HTTP stream.
     // Safe to call from any context.
     void TogglePause();
@@ -47,10 +51,6 @@ private:
     // Fetch search results from the server and return them as a JSON string
     // the AI can read. Called synchronously inside the MCP callback.
     std::string FetchSearchResults(const std::string& query);
-
-    // Fetch the play URL for an item ID, then kick off the stream task.
-    // Returns an error string if the item isn't found.
-    std::string StartItem(const std::string& item_id);
 
     // Stop any in-flight stream task and reset state.
     void StopPlayback();

@@ -9,6 +9,7 @@
 #include "video_player.h"
 #include "doom_player.h"
 #include "bt_gamepad.h"
+#include "demo_sequencer.h"
 #include <esp_log.h>
 #include <esp_app_desc.h>
 #include <algorithm>
@@ -170,7 +171,8 @@ void McpServer::AddCommonTools() {
     FlappyBird::GetInstance().RegisterMcpTools();
     VideoPlayer::GetInstance().RegisterMcpTools();
     DoomPlayer::GetInstance().RegisterMcpTools();
-    bt_gamepad_register_mcp();   // self.controller.* (BLE Q36 gamepad)
+    bt_gamepad_register_mcp();        // self.controller.* (BLE Q36 gamepad)
+    demo_sequencer_register_mcp();    // self.test.* (self-test / demo sequence)
 
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());
