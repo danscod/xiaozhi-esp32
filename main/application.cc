@@ -356,7 +356,8 @@ void Application::StartAutoUpdateTimer() {
         xTaskCreate([](void* arg) {
             static_cast<Application*>(arg)->CheckAutoUpdate();
             vTaskDelete(nullptr);
-        }, "auto_update", 4096, self, 1, nullptr);
+        }, "auto_update", 8192, self, 1, nullptr);   // 4096 overflowed mid-OTA
+                                                      // (TLS + download path) -> 8192
     };
     args.arg = this;
     args.dispatch_method = ESP_TIMER_TASK;
