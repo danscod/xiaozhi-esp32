@@ -95,17 +95,20 @@ static void scan_task(void* arg) {
     (void)arg;
 
     // NimBLE needs an identity address before a scan can infer own_addr_type;
-    // without one, ble_hs_id_infer_auto() inside the scan derefs NULL and panics
-    // (LoadProhibited). Wait for the host to sync, then ensure an address exists.
-    for (int i = 0; i < 100 && !ble_hs_synced(); i++) vTaskDelay(pdMS_TO_TICKS(50));
-    int addr_rc = ble_hs_util_ensure_addr(0);
-    ESP_LOGI(TAG, "BLE host synced=%d ensure_addr=%d", (int)ble_hs_synced(), addr_rc);
+    // without one the scan derefs NULL and panics (LoadProhibited). Wait for the
+    // host to sync FIRST (abort cleanly if it never does — no crash), then ensure
+    // an address. Use prefer_random=1: ensure_addr(0) prefers the PUBLIC address,
+    // which isn't configured here and NULL-derefs — a generated random static
+    // address is fine for a scanning/connecting central.
+    for (int i = 0; i < 200 && !ble_hs_synced(); i++) vTaskDelay(pdMS_TO_TICKS(50));
     if (!ble_hs_synced()) {
         ESP_LOGE(TAG, "BLE host never synced — aborting scan");
         s_scan_task = nullptr;
         vTaskDelete(nullptr);
         return;
     }
+    int addr_rc = ble_hs_util_ensure_addr(1);   // 1 = prefer random static address
+    ESP_LOGI(TAG, "BLE host synced; ensure_addr(random)=%d", addr_rc);
 
     for (int round = 0; round < kScanMaxRounds && !s_connected.load() && s_started.load(); round++) {
         size_t num = 0;
