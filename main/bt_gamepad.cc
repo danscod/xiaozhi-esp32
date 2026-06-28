@@ -156,26 +156,29 @@ static void scan_task(void* arg) {
         if (match) {
             ESP_LOGI(TAG, "opening controller %s (addr_type=%d)",
                      match->name ? match->name : "?", match->ble.addr_type);
-            ble_addr_t peer;
-            peer.type = match->ble.addr_type;
-            memcpy(peer.val, match->bda, 6);
             esp_hidh_dev_open(match->bda, match->transport, match->ble.addr_type);
             if (results) esp_hid_scan_results_free(results);
 
             // esp_hidh goes straight to GATT discovery and never pairs, but the
-            // HID reports require encryption. Once the link is up, initiate
-            // security ourselves so the protected reads succeed (otherwise the
-            // controller drops the link on "insufficient authentication").
-            for (int i = 0; i < 60; i++) {
-                struct ble_gap_conn_desc desc;
-                if (ble_gap_conn_find_by_addr(&peer, &desc) == 0) {
-                    int sr = ble_gap_security_initiate(desc.conn_handle);
-                    ESP_LOGI(TAG, "pairing: security_initiate conn=%d rc=%d",
-                             desc.conn_handle, sr);
-                    break;
+            // HID reports require encryption. Initiate security ourselves as soon
+            // as the link is up (before esp_hidh reads the protected chars). Find
+            // the connection by HANDLE, not address: pre-bond, the connection's
+            // identity address isn't populated so ble_gap_conn_find_by_addr never
+            // matches. Only the Q36 is connected in game mode, so iterate handles.
+            bool paired = false;
+            for (int t = 0; t < 80 && !paired; t++) {
+                for (uint16_t h = 0; h <= 8; h++) {
+                    struct ble_gap_conn_desc desc;
+                    if (ble_gap_conn_find(h, &desc) == 0) {
+                        int sr = ble_gap_security_initiate(h);
+                        ESP_LOGI(TAG, "pairing: security_initiate conn=%u rc=%d", h, sr);
+                        paired = true;
+                        break;
+                    }
                 }
-                vTaskDelay(pdMS_TO_TICKS(50));
+                if (!paired) vTaskDelay(pdMS_TO_TICKS(50));
             }
+            if (!paired) ESP_LOGW(TAG, "pairing: no connection found to secure");
             break;  // OPEN/INPUT now arrive via the callback
         }
         if (results) esp_hid_scan_results_free(results);
