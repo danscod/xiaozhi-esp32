@@ -12,10 +12,14 @@
 
 #include "esp_hidh.h"
 #include "esp_hid_gap.h"
-#include "host/ble_hs.h"        // ble_hs_synced
+#include "host/ble_hs.h"        // ble_hs_synced, ble_hs_cfg
+#include "host/ble_gap.h"       // ble_gap_conn_find_by_addr, ble_gap_security_initiate
+#include "host/ble_sm.h"        // BLE_SM_PAIR_KEY_DIST_*
 #include "host/util/util.h"     // ble_hs_util_ensure_addr
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+
+extern "C" void ble_store_config_init(void);   // NVS-backed bonding key store
 
 #include "mcp_server.h"
 
@@ -152,8 +156,26 @@ static void scan_task(void* arg) {
         if (match) {
             ESP_LOGI(TAG, "opening controller %s (addr_type=%d)",
                      match->name ? match->name : "?", match->ble.addr_type);
+            ble_addr_t peer;
+            peer.type = match->ble.addr_type;
+            memcpy(peer.val, match->bda, 6);
             esp_hidh_dev_open(match->bda, match->transport, match->ble.addr_type);
             if (results) esp_hid_scan_results_free(results);
+
+            // esp_hidh goes straight to GATT discovery and never pairs, but the
+            // HID reports require encryption. Once the link is up, initiate
+            // security ourselves so the protected reads succeed (otherwise the
+            // controller drops the link on "insufficient authentication").
+            for (int i = 0; i < 60; i++) {
+                struct ble_gap_conn_desc desc;
+                if (ble_gap_conn_find_by_addr(&peer, &desc) == 0) {
+                    int sr = ble_gap_security_initiate(desc.conn_handle);
+                    ESP_LOGI(TAG, "pairing: security_initiate conn=%d rc=%d",
+                             desc.conn_handle, sr);
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
             break;  // OPEN/INPUT now arrive via the callback
         }
         if (results) esp_hid_scan_results_free(results);
@@ -195,6 +217,18 @@ esp_err_t bt_gamepad_start(void) {
         s_started.store(false);
         return ret;
     }
+
+    // Security Manager: the HID report characteristics require an encrypted/
+    // bonded link (reads otherwise fail "insufficient authentication" and the
+    // controller drops the connection). Just-works pairing (no input/output),
+    // NVS-backed key storage so the bond persists across reboots.
+    ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
+    ble_hs_cfg.sm_bonding = 1;
+    ble_hs_cfg.sm_mitm = 0;
+    ble_hs_cfg.sm_sc = 1;
+    ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_store_config_init();
 
     // RUN the NimBLE host. esp_hid_gap_init only port-inits the host and
     // esp_hidh_init only registers ble_hs_cfg.sync_cb — nobody starts the host
