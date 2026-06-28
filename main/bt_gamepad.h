@@ -45,6 +45,10 @@ void bt_gamepad_get_state(bt_gamepad_state_t *out);
 // *out_seq increments per report (for change detection). out_seq may be NULL.
 bool bt_gamepad_get_raw(uint8_t *buf, size_t buflen, size_t *out_len, uint32_t *out_seq);
 
+// HID report ID of the most recent input report (e.g. the gamepad report vs a
+// separate consumer/system report for Home).
+uint8_t bt_gamepad_raw_report_id(void);
+
 // Register the self.controller.* MCP tools (pair / unpair / status).
 void bt_gamepad_register_mcp(void);
 

@@ -202,18 +202,20 @@ static void ShowControllerTestScreen() {
             bt_gamepad_get_raw(b, sizeof(b), &len, &seq);
             if (seq != last_seq) {
                 last_seq = seq;
-                const char* hat = (len > 4 && b[4] < 8) ? kHat[b[4]] : "-";
+                // No analog sticks on the Q36: bytes 0-3 are fixed HID axes (0x80).
+                // The D-pad is the hat (byte 4); the buttons are bytes 5-9. Show
+                // the raw report + the hat decode; map buttons by which byte moves.
+                const char* hat = (len > 4 && b[4] < 8) ? kHat[b[4]] : "center";
                 snprintf(msg, sizeof(msg),
                          "Q36 connected\n"
-                         "L %3d,%3d  R %3d,%3d\n"
-                         "hat %02X %s\n"
-                         "btn %02X %02X %02X %02X %02X\n\n"
-                         "press buttons to test\nBOOT button = play DOOM",
-                         len > 0 ? b[0] : 0, len > 1 ? b[1] : 0,
-                         len > 2 ? b[2] : 0, len > 3 ? b[3] : 0,
-                         len > 4 ? b[4] : 0, hat,
-                         len > 5 ? b[5] : 0, len > 6 ? b[6] : 0, len > 7 ? b[7] : 0,
-                         len > 8 ? b[8] : 0, len > 9 ? b[9] : 0);
+                         "id%u: %02X %02X %02X %02X %02X\n%02X %02X %02X %02X %02X\n"
+                         "D-pad: %s\n\n"
+                         "press a button -\nwatch which byte changes\nBOOT = play DOOM",
+                         bt_gamepad_raw_report_id(),
+                         len > 0 ? b[0] : 0, len > 1 ? b[1] : 0, len > 2 ? b[2] : 0,
+                         len > 3 ? b[3] : 0, len > 4 ? b[4] : 0, len > 5 ? b[5] : 0,
+                         len > 6 ? b[6] : 0, len > 7 ? b[7] : 0, len > 8 ? b[8] : 0,
+                         len > 9 ? b[9] : 0, hat);
                 display->SetChatMessage("system", msg);
             }
         }
