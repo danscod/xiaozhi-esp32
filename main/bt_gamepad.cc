@@ -45,28 +45,19 @@ static size_t   s_raw_len = 0;
 static uint8_t  s_raw_id  = 0;
 
 // The specific controller, baked in (confirmed via nRF Connect):
-//   HID mode:         name "Q36 for Android", MAC 03:25:00:33:AF:EB
-//   ShootingPlus mode:name "ShanWan Q36",     MAC 01:25:00:33:AF:EB
-// The Q36 doesn't put its name in the BLE advertisement (only readable via GATT
-// after connecting), so name-matching alone never finds it — match by MAC too.
-static const uint8_t kQ36HidMac[6] = {0x03, 0x25, 0x00, 0x33, 0xAF, 0xEB};
-static const uint8_t kQ36SpMac[6]  = {0x01, 0x25, 0x00, 0x33, 0xAF, 0xEB};
-
-// Match a scanned address against a known MAC in EITHER byte order (the stored
-// order vs human MSB-first is ambiguous across the esp_hid/NimBLE boundary).
-static bool bda_matches(const uint8_t* bda, const uint8_t* mac) {
-    bool fwd = true, rev = true;
-    for (int i = 0; i < 6; i++) {
-        if (bda[i] != mac[i])     fwd = false;
-        if (bda[i] != mac[5 - i]) rev = false;
-    }
-    return fwd || rev;
-}
-
+//   HID mode:         "Q36 for Android", MAC 03:25:00:33:AF:Ex
+//   ShootingPlus mode:"ShanWan Q36",     MAC 01:25:00:33:AF:Ex
+// The Q36 doesn't put its name in the BLE advertisement (readable only via GATT
+// after connecting), and its address's LAST byte rotates between boots (…AF:EB,
+// …AF:EC, …). So match the STABLE address family, ignoring the varying byte.
+// In the stored (NimBLE little-endian) order the address is {Ex,AF,33,00,25,mode}
+// where mode = 0x03 (HID) or 0x01 (ShootingPlus).
 static bool looks_like_q36(const esp_hid_scan_result_t* r) {
     if (r->transport != ESP_HID_TRANSPORT_BLE) return false;
     if (r->name && (strstr(r->name, "Q36") || strstr(r->name, "ShanWan"))) return true;
-    return bda_matches(r->bda, kQ36HidMac) || bda_matches(r->bda, kQ36SpMac);
+    const uint8_t* a = r->bda;
+    return a[1] == 0xAF && a[2] == 0x33 && a[3] == 0x00 && a[4] == 0x25 &&
+           (a[5] == 0x03 || a[5] == 0x01);   // a[0] (last MAC byte) varies — ignore
 }
 
 // esp_hidh event callback (default event loop). C linkage for esp_event.
