@@ -38,11 +38,26 @@ static bt_gamepad_state_t s_state = {};
 // The specific controller, baked in (confirmed via nRF Connect):
 //   HID mode:         name "Q36 for Android", MAC 03:25:00:33:AF:EB
 //   ShootingPlus mode:name "ShanWan Q36",     MAC 01:25:00:33:AF:EB
-// Both are standard BLE HID (HOGP, 0x1812). Manufacturer "ShanWan BM-769".
-// We match by name so we never grab some other random BLE gamepad nearby.
+// The Q36 doesn't put its name in the BLE advertisement (only readable via GATT
+// after connecting), so name-matching alone never finds it — match by MAC too.
+static const uint8_t kQ36HidMac[6] = {0x03, 0x25, 0x00, 0x33, 0xAF, 0xEB};
+static const uint8_t kQ36SpMac[6]  = {0x01, 0x25, 0x00, 0x33, 0xAF, 0xEB};
+
+// Match a scanned address against a known MAC in EITHER byte order (the stored
+// order vs human MSB-first is ambiguous across the esp_hid/NimBLE boundary).
+static bool bda_matches(const uint8_t* bda, const uint8_t* mac) {
+    bool fwd = true, rev = true;
+    for (int i = 0; i < 6; i++) {
+        if (bda[i] != mac[i])     fwd = false;
+        if (bda[i] != mac[5 - i]) rev = false;
+    }
+    return fwd || rev;
+}
+
 static bool looks_like_q36(const esp_hid_scan_result_t* r) {
-    if (r->transport != ESP_HID_TRANSPORT_BLE || !r->name) return false;
-    return strstr(r->name, "Q36") != nullptr || strstr(r->name, "ShanWan") != nullptr;
+    if (r->transport != ESP_HID_TRANSPORT_BLE) return false;
+    if (r->name && (strstr(r->name, "Q36") || strstr(r->name, "ShanWan"))) return true;
+    return bda_matches(r->bda, kQ36HidMac) || bda_matches(r->bda, kQ36SpMac);
 }
 
 // esp_hidh event callback (default event loop). C linkage for esp_event.
@@ -127,8 +142,9 @@ static void scan_task(void* arg) {
 
         esp_hid_scan_result_t* match = nullptr;
         for (esp_hid_scan_result_t* r = results; r; r = r->next) {
-            ESP_LOGI(TAG, "  %s rssi=%d usage=%s name=%s",
+            ESP_LOGI(TAG, "  %s %02x:%02x:%02x:%02x:%02x:%02x rssi=%d usage=%s name=%s",
                      (r->transport == ESP_HID_TRANSPORT_BLE) ? "BLE" : "BT",
+                     r->bda[0], r->bda[1], r->bda[2], r->bda[3], r->bda[4], r->bda[5],
                      r->rssi, esp_hid_usage_str(r->usage), r->name ? r->name : "");
             if (!match && looks_like_q36(r)) match = r;
         }
