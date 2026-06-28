@@ -118,6 +118,33 @@ static void ble_host_task(void* param) {
     nimble_port_freertos_deinit();
 }
 
+// esp_hidh_dev_open() BLOCKS until GATT discovery completes or fails, and esp_hidh
+// never pairs — so the encrypted HID report reads fail ("insufficient auth") and
+// the link drops. This task runs CONCURRENTLY with that blocked open: as soon as
+// the link is up it initiates security, so the protected reads succeed in time.
+// Only the Q36 is connected in game mode, so we find the connection by handle.
+static void pair_task(void* arg) {
+    (void)arg;
+    for (int t = 0; t < 120; t++) {          // ~6s window
+        for (uint16_t h = 0; h <= 8; h++) {
+            struct ble_gap_conn_desc desc;
+            if (ble_gap_conn_find(h, &desc) == 0) {
+                if (!desc.sec_state.encrypted) {
+                    int sr = ble_gap_security_initiate(h);
+                    ESP_LOGI(TAG, "pairing: security_initiate conn=%u rc=%d", h, sr);
+                } else {
+                    ESP_LOGI(TAG, "pairing: conn=%u already encrypted", h);
+                }
+                vTaskDelete(nullptr);
+                return;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    ESP_LOGW(TAG, "pairing: no connection appeared to secure");
+    vTaskDelete(nullptr);
+}
+
 // Scan for the Q36 and open it. Exits once connected or after kScanMaxRounds.
 static void scan_task(void* arg) {
     (void)arg;
@@ -154,32 +181,21 @@ static void scan_task(void* arg) {
         }
 
         if (match) {
+            // Copy the address out before freeing the results list (open uses it,
+            // and esp_hidh_dev_open blocks for the whole connection).
+            uint8_t bda[6];
+            memcpy(bda, match->bda, sizeof(bda));
+            esp_hid_transport_t transport = match->transport;
+            uint8_t addr_type = match->ble.addr_type;
             ESP_LOGI(TAG, "opening controller %s (addr_type=%d)",
-                     match->name ? match->name : "?", match->ble.addr_type);
-            esp_hidh_dev_open(match->bda, match->transport, match->ble.addr_type);
+                     match->name ? match->name : "?", addr_type);
             if (results) esp_hid_scan_results_free(results);
 
-            // esp_hidh goes straight to GATT discovery and never pairs, but the
-            // HID reports require encryption. Initiate security ourselves as soon
-            // as the link is up (before esp_hidh reads the protected chars). Find
-            // the connection by HANDLE, not address: pre-bond, the connection's
-            // identity address isn't populated so ble_gap_conn_find_by_addr never
-            // matches. Only the Q36 is connected in game mode, so iterate handles.
-            bool paired = false;
-            for (int t = 0; t < 80 && !paired; t++) {
-                for (uint16_t h = 0; h <= 8; h++) {
-                    struct ble_gap_conn_desc desc;
-                    if (ble_gap_conn_find(h, &desc) == 0) {
-                        int sr = ble_gap_security_initiate(h);
-                        ESP_LOGI(TAG, "pairing: security_initiate conn=%u rc=%d", h, sr);
-                        paired = true;
-                        break;
-                    }
-                }
-                if (!paired) vTaskDelay(pdMS_TO_TICKS(50));
-            }
-            if (!paired) ESP_LOGW(TAG, "pairing: no connection found to secure");
-            break;  // OPEN/INPUT now arrive via the callback
+            // esp_hidh_dev_open BLOCKS until discovery finishes — spawn the pairing
+            // task FIRST so it can encrypt the link while open is mid-discovery.
+            xTaskCreate(pair_task, "bt_gp_pair", 3072, nullptr, 6, nullptr);
+            esp_hidh_dev_open(bda, transport, addr_type);
+            break;  // OPEN/INPUT arrive via the callback
         }
         if (results) esp_hid_scan_results_free(results);
     }
