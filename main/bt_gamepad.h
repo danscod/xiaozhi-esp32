@@ -40,6 +40,11 @@ bool bt_gamepad_connected(void);
 // Copy the latest decoded state. Safe to call from any task.
 void bt_gamepad_get_state(bt_gamepad_state_t *out);
 
+// Copy the latest RAW HID input report (for the on-device controller test
+// screen). Returns true if a report is available; *out_len = bytes copied,
+// *out_seq increments per report (for change detection). out_seq may be NULL.
+bool bt_gamepad_get_raw(uint8_t *buf, size_t buflen, size_t *out_len, uint32_t *out_seq);
+
 // Register the self.controller.* MCP tools (pair / unpair / status).
 void bt_gamepad_register_mcp(void);
 

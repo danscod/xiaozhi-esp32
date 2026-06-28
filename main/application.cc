@@ -177,17 +177,66 @@ void Application::Initialize() {
     display->UpdateStatusBar(true);
 }
 
+// Game-mode controller pairing/test screen: shows the BLE connection status and a
+// LIVE view of the Q36's HID report (sticks / hat / button bytes) so the user can
+// see each control register and map it. Blocks until the BOOT button is pressed
+// (then DOOM launches), with a safety timeout.
+static void ShowControllerTestScreen() {
+    auto* display = Board::GetInstance().GetDisplay();
+    if (!display) return;
+    display->SetStatus("Controller");
+    static const char* kHat[] = {"Up","UpR","Right","DnR","Down","DnL","Left","UpL"};
+    uint32_t last_seq = 0xFFFFFFFF;
+    int waited_ms = 0;
+    const int kTimeoutMs = 120000;   // safety: launch DOOM after 2 min regardless
+
+    // Read the BOOT button level (board already set it up as input; active-low).
+    while (gpio_get_level(GPIO_NUM_0) == 1 && waited_ms < kTimeoutMs) {
+        char msg[192];
+        if (!bt_gamepad_connected()) {
+            snprintf(msg, sizeof(msg),
+                     "Connecting controller...\n\nQ36 in HID mode (D),\nphone Bluetooth OFF.\n\nBOOT button = play DOOM");
+            display->SetChatMessage("system", msg);
+        } else {
+            uint8_t b[16]; size_t len = 0; uint32_t seq = 0;
+            bt_gamepad_get_raw(b, sizeof(b), &len, &seq);
+            if (seq != last_seq) {
+                last_seq = seq;
+                const char* hat = (len > 4 && b[4] < 8) ? kHat[b[4]] : "-";
+                snprintf(msg, sizeof(msg),
+                         "Q36 connected\n"
+                         "L %3d,%3d  R %3d,%3d\n"
+                         "hat %02X %s\n"
+                         "btn %02X %02X %02X %02X %02X\n\n"
+                         "press buttons to test\nBOOT button = play DOOM",
+                         len > 0 ? b[0] : 0, len > 1 ? b[1] : 0,
+                         len > 2 ? b[2] : 0, len > 3 ? b[3] : 0,
+                         len > 4 ? b[4] : 0, hat,
+                         len > 5 ? b[5] : 0, len > 6 ? b[6] : 0, len > 7 ? b[7] : 0,
+                         len > 8 ? b[8] : 0, len > 9 ? b[9] : 0);
+                display->SetChatMessage("system", msg);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+        waited_ms += 100;
+    }
+    vTaskDelay(pdMS_TO_TICKS(300));   // debounce the BOOT press
+    display->SetChatMessage("system", "Launching DOOM...");
+}
+
 void Application::Run() {
     // Set the priority of the main task to 10
     vTaskPrioritySet(nullptr, 10);
 
     // GAME MODE: WiFi/assistant are skipped, so the RAM is free for the BLE
-    // controller. Bring up the gamepad and launch DOOM straight away. Exiting
-    // DOOM (long-press) reboots back to normal mode (see DoomPlayer::Stop). The
-    // event loop below still runs (button handling), but there's no network.
+    // controller. Bring up the gamepad, show the pairing/test screen (live HID
+    // report so the user can see buttons register + map them), then launch DOOM
+    // when the BOOT button is pressed. Exiting DOOM (long-press) reboots back to
+    // normal mode (see DoomPlayer::Stop).
     if (game_mode_active()) {
         ESP_LOGW(TAG, "game mode: starting BLE controller + DOOM");
         bt_gamepad_start();
+        ShowControllerTestScreen();
         DoomPlayer::GetInstance().Start();
     }
 

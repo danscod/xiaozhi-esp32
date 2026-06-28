@@ -39,6 +39,10 @@ static esp_hidh_dev_t*   s_dev = nullptr;
 static portMUX_TYPE      s_state_mux = portMUX_INITIALIZER_UNLOCKED;
 static bt_gamepad_state_t s_state = {};
 
+// Latest RAW HID input report (for the on-device controller test screen).
+static uint8_t  s_raw[32] = {0};
+static size_t   s_raw_len = 0;
+
 // The specific controller, baked in (confirmed via nRF Connect):
 //   HID mode:         name "Q36 for Android", MAC 03:25:00:33:AF:EB
 //   ShootingPlus mode:name "ShanWan Q36",     MAC 01:25:00:33:AF:EB
@@ -92,6 +96,10 @@ extern "C" void bt_gamepad_hidh_cb(void* handler_args, esp_event_base_t base,
                  param->input.map_index, param->input.report_id, param->input.length);
         ESP_LOG_BUFFER_HEX(TAG, param->input.data, param->input.length);
         taskENTER_CRITICAL(&s_state_mux);
+        size_t n = param->input.length;
+        if (n > sizeof(s_raw)) n = sizeof(s_raw);
+        memcpy(s_raw, param->input.data, n);
+        s_raw_len = n;
         s_state.seq++;
         // TODO(report-layout): decode buttons/dpad/sticks from param->input.data
         taskEXIT_CRITICAL(&s_state_mux);
@@ -283,6 +291,17 @@ void bt_gamepad_get_state(bt_gamepad_state_t* out) {
     taskENTER_CRITICAL(&s_state_mux);
     *out = s_state;
     taskEXIT_CRITICAL(&s_state_mux);
+}
+
+bool bt_gamepad_get_raw(uint8_t* buf, size_t buflen, size_t* out_len, uint32_t* out_seq) {
+    if (!buf || !out_len) return false;
+    taskENTER_CRITICAL(&s_state_mux);
+    size_t n = s_raw_len < buflen ? s_raw_len : buflen;
+    memcpy(buf, s_raw, n);
+    *out_len = n;
+    if (out_seq) *out_seq = s_state.seq;
+    taskEXIT_CRITICAL(&s_state_mux);
+    return n > 0;
 }
 
 void bt_gamepad_register_mcp(void) {
