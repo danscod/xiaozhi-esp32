@@ -20,6 +20,7 @@
 #include "nimble/nimble_port_freertos.h"
 
 extern "C" void ble_store_config_init(void);   // NVS-backed bonding key store
+extern "C" int  ble_store_clear(void);         // wipe all stored bonds
 
 #include "mcp_server.h"
 
@@ -249,6 +250,11 @@ esp_err_t bt_gamepad_start(void) {
     ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_store_config_init();
+    // The Q36's BLE address rotates every boot, so a persisted bond never matches
+    // and instead jams the security handshake (security_initiate rc=8, no encrypt,
+    // connection times out). Wipe stale bonds so we always do a fresh just-works
+    // pair (the path that worked first time).
+    ble_store_clear();
 
     // RUN the NimBLE host. esp_hid_gap_init only port-inits the host and
     // esp_hidh_init only registers ble_hs_cfg.sync_cb — nobody starts the host
