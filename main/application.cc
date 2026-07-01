@@ -208,16 +208,17 @@ static void ShowControllerTestScreen() {
                 const char* d = (b[4] < 8) ? kHat[b[4]] : "";
                 snprintf(live, sizeof(live), "%s%s%s%s%s%s%s%s%s",
                          d,
-                         (b[5] & 0x02) ? " A" : "", (b[5] & 0x01) ? " B" : "",
+                         (b[5] & 0x01) ? " A" : "", (b[5] & 0x02) ? " B" : "",
                          (b[5] & 0x08) ? " X" : "", (b[5] & 0x10) ? " Y" : "",
-                         (b[5] & 0x40) ? " L" : "", (b[5] & 0x80) ? " LZ" : "",
-                         (b[6] & 0x02) ? " R" : "", (b[6] & 0x01) ? " RZ" : "");
+                         (b[5] & 0x40) ? " L" : "", (b[5] & 0x80) ? " R" : "",
+                         (b[6] & 0x01) ? " LZ" : "", (b[6] & 0x02) ? " RZ" : "");
             }
             snprintf(msg, sizeof(msg),
                      "Q36 ready!\n"
                      "Dpad move  A fire\n"
                      "B open  L/R strafe\n"
                      "LZ run  X weapon\n"
+                     "- or Home = menu\n"
                      "> BOOT = START <\n"
                      "[%s]",
                      live);
@@ -230,22 +231,44 @@ static void ShowControllerTestScreen() {
     display->ShowNotification("Starting DOOM...", 2000);
 }
 
-// Poll the Q36 HID report ~60Hz and feed it to DOOM (runs during game mode).
+// Poll the Q36 HID reports ~60Hz and feed them to DOOM (runs during game mode).
+// The gamepad (id=4) and the +/-/Home consumer keys (id=3) arrive as SEPARATE
+// reports, so keep their state independently and OR them together each call.
 static void GamepadPollTask(void*) {
+    int      s_hat = 0xFF;   // neutral D-pad
+    unsigned s_pad = 0;      // gamepad buttons (id=4)
+    unsigned s_con = 0;      // consumer keys +/-/Home (id=3)
+    uint32_t last_seq = 0;
     for (;;) {
-        if (bt_gamepad_connected() && bt_gamepad_raw_report_id() == 4) {
+        if (bt_gamepad_connected()) {
             uint8_t b[16] = {0}; size_t len = 0; uint32_t seq = 0;
-            if (bt_gamepad_get_raw(b, sizeof(b), &len, &seq) && len >= 7) {
-                unsigned btn = 0;
-                if (b[5] & 0x02) btn |= XZ_A;
-                if (b[5] & 0x01) btn |= XZ_B;
-                if (b[5] & 0x08) btn |= XZ_X;
-                if (b[5] & 0x10) btn |= XZ_Y;
-                if (b[5] & 0x40) btn |= XZ_L;
-                if (b[5] & 0x80) btn |= XZ_LZ;
-                if (b[6] & 0x02) btn |= XZ_R;
-                if (b[6] & 0x01) btn |= XZ_RZ;
-                xiaozhi_doom_gamepad(b[4], btn);
+            if (bt_gamepad_get_raw(b, sizeof(b), &len, &seq) && seq != last_seq) {
+                last_seq = seq;
+                int id = bt_gamepad_raw_report_id();
+                if (id == 4 && len >= 7) {
+                    // Corrected map (hw-verified 2.3.54): A/B were swapped and the
+                    // R/LZ/RZ shoulder bits were rotated.
+                    unsigned btn = 0;
+                    if (b[5] & 0x01) btn |= XZ_A;    // fire
+                    if (b[5] & 0x02) btn |= XZ_B;    // open/use
+                    if (b[5] & 0x08) btn |= XZ_X;    // weapon
+                    if (b[5] & 0x10) btn |= XZ_Y;    // map
+                    if (b[5] & 0x40) btn |= XZ_L;    // strafe left
+                    if (b[5] & 0x80) btn |= XZ_R;    // strafe right (was LZ)
+                    if (b[6] & 0x01) btn |= XZ_LZ;   // run (was RZ)
+                    if (b[6] & 0x02) btn |= XZ_RZ;   // strafe mod (was R)
+                    s_pad = btn;
+                    s_hat = b[4];
+                } else if (id == 3 && len >= 2) {
+                    // 16-bit consumer usage: + =0xE9, - =0xEA, Home=0x0223.
+                    // Any of these opens/toggles the DOOM menu (escape); + also
+                    // confirms menu selections (enter).
+                    unsigned u = b[0] | (b[1] << 8);
+                    if (u == 0xE9) s_con = XZ_PLUS;              // + (Start): menu enter/confirm
+                    else if (u == 0xEA || u == 0x0223) s_con = XZ_MINUS;  // - (Select) / Home: open menu / back
+                    else s_con = 0;                             // key released
+                }
+                xiaozhi_doom_gamepad(s_hat, s_pad | s_con);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(15));
