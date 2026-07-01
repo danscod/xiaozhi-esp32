@@ -4,6 +4,7 @@
 #include "game_mode.h"
 #include "doom_player.h"
 #include "bt_gamepad.h"
+#include "xiaozhi_gamepad.h"
 #include "display.h"
 #include "system_info.h"
 #include "audio_codec.h"
@@ -188,31 +189,67 @@ static void ShowControllerTestScreen() {
     int waited_ms = 0;
     const int kTimeoutMs = 120000;   // safety: launch DOOM after 2 min regardless
 
+    (void)kHat;
     // Use ShowNotification (a visible LVGL label) — SetChatMessage isn't rendered
     // by this display. Refresh every loop so the notification timer never expires.
     // Read the BOOT button level (board set it up as input; active-low) to advance.
     while (gpio_get_level(GPIO_NUM_0) == 1 && waited_ms < kTimeoutMs) {
-        char msg[160];
+        char msg[220];
         if (!bt_gamepad_connected()) {
             snprintf(msg, sizeof(msg),
-                     "Connecting controller...\nQ36 HID mode, phone BT off\nBOOT = play DOOM");
+                     "Connecting controller...\nQ36 HID mode, phone BT off\nBOOT button = play");
         } else {
-            // No analog sticks: bytes 0-3 are fixed HID axes (0x80). D-pad is the
-            // hat (byte 4); buttons are bytes 5-9. Show raw report + hat decode.
+            // Teach the control scheme so the player knows how to play, plus a
+            // live "pressed" line so they can see it responding.
             uint8_t b[16] = {0}; size_t len = 0; uint32_t seq = 0;
             bt_gamepad_get_raw(b, sizeof(b), &len, &seq);
-            const char* hat = (len > 4 && b[4] < 8) ? kHat[b[4]] : "center";
+            char live[48] = "-";
+            if (bt_gamepad_raw_report_id() == 4 && len >= 7) {
+                const char* d = (b[4] < 8) ? kHat[b[4]] : "";
+                snprintf(live, sizeof(live), "%s%s%s%s%s%s%s%s%s",
+                         d,
+                         (b[5] & 0x02) ? " A" : "", (b[5] & 0x01) ? " B" : "",
+                         (b[5] & 0x08) ? " X" : "", (b[5] & 0x10) ? " Y" : "",
+                         (b[5] & 0x40) ? " L" : "", (b[5] & 0x80) ? " LZ" : "",
+                         (b[6] & 0x02) ? " R" : "", (b[6] & 0x01) ? " RZ" : "");
+            }
             snprintf(msg, sizeof(msg),
-                     "Q36 id%u\n%02X %02X %02X %02X %02X\n%02X %02X %02X %02X %02X\nD-pad:%s  BOOT=DOOM",
-                     bt_gamepad_raw_report_id(),
-                     b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], hat);
+                     "Q36 ready!\n"
+                     "Dpad move  A fire\n"
+                     "B open  L/R strafe\n"
+                     "LZ run  X weapon\n"
+                     "> BOOT = START <\n"
+                     "[%s]",
+                     live);
         }
         display->ShowNotification(msg, 1500);
         vTaskDelay(pdMS_TO_TICKS(100));
         waited_ms += 100;
     }
     vTaskDelay(pdMS_TO_TICKS(300));   // debounce the BOOT press
-    display->ShowNotification("Launching DOOM...", 2000);
+    display->ShowNotification("Starting DOOM...", 2000);
+}
+
+// Poll the Q36 HID report ~60Hz and feed it to DOOM (runs during game mode).
+static void GamepadPollTask(void*) {
+    for (;;) {
+        if (bt_gamepad_connected() && bt_gamepad_raw_report_id() == 4) {
+            uint8_t b[16] = {0}; size_t len = 0; uint32_t seq = 0;
+            if (bt_gamepad_get_raw(b, sizeof(b), &len, &seq) && len >= 7) {
+                unsigned btn = 0;
+                if (b[5] & 0x02) btn |= XZ_A;
+                if (b[5] & 0x01) btn |= XZ_B;
+                if (b[5] & 0x08) btn |= XZ_X;
+                if (b[5] & 0x10) btn |= XZ_Y;
+                if (b[5] & 0x40) btn |= XZ_L;
+                if (b[5] & 0x80) btn |= XZ_LZ;
+                if (b[6] & 0x02) btn |= XZ_R;
+                if (b[6] & 0x01) btn |= XZ_RZ;
+                xiaozhi_doom_gamepad(b[4], btn);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(15));
+    }
 }
 
 void Application::Run() {
@@ -227,8 +264,10 @@ void Application::Run() {
     if (game_mode_active()) {
         ESP_LOGW(TAG, "game mode: starting BLE controller + DOOM");
         bt_gamepad_start();
-        ShowControllerTestScreen();
+        ShowControllerTestScreen();          // teach controls + wait for BOOT
+        xiaozhi_doom_interactive = 1;         // launch a playable game, not the demo
         DoomPlayer::GetInstance().Start();
+        xTaskCreate(GamepadPollTask, "gp_poll", 3072, nullptr, 5, nullptr);
     }
 
     const EventBits_t ALL_EVENTS = 
