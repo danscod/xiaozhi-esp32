@@ -211,14 +211,14 @@ static void ShowControllerTestScreen() {
                          (b[5] & 0x01) ? " A" : "", (b[5] & 0x02) ? " B" : "",
                          (b[5] & 0x08) ? " X" : "", (b[5] & 0x10) ? " Y" : "",
                          (b[5] & 0x40) ? " L" : "", (b[5] & 0x80) ? " R" : "",
-                         (b[6] & 0x01) ? " LZ" : "", (b[6] & 0x02) ? " RZ" : "");
+                         (b[6] & 0x01) ? " L2" : "", (b[6] & 0x02) ? " R2" : "");
             }
             snprintf(msg, sizeof(msg),
                      "Q36 ready!\n"
                      "Dpad move  A fire\n"
                      "B open  L/R strafe\n"
-                     "LZ run  X weapon\n"
-                     "- or Home = menu\n"
+                     "L2 run  X weapon\n"
+                     "- menu  Home swap\n"
                      "> BOOT = START <\n"
                      "[%s]",
                      live);
@@ -264,8 +264,9 @@ static void GamepadPollTask(void*) {
                     // Any of these opens/toggles the DOOM menu (escape); + also
                     // confirms menu selections (enter).
                     unsigned u = b[0] | (b[1] << 8);
-                    if (u == 0xE9) s_con = XZ_PLUS;              // + (Start): menu enter/confirm
-                    else if (u == 0xEA || u == 0x0223) s_con = XZ_MINUS;  // - (Select) / Home: open menu / back
+                    if (u == 0xE9) s_con = XZ_PLUS;             // + (Start): menu enter/confirm
+                    else if (u == 0xEA) s_con = XZ_MINUS;       // - (Select): open menu / back
+                    else if (u == 0x0223) s_con = XZ_TOGGLE;    // Home: swap turn<->strafe
                     else s_con = 0;                             // key released
                 }
                 xiaozhi_doom_gamepad(s_hat, s_pad | s_con);
